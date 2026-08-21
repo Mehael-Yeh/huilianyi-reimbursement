@@ -13,6 +13,7 @@ from pathlib import Path
 from hly_api import clients_from_auth, login
 from hly_workflow import (
     add_invoice,
+    add_manual_expense,
     build_history_model,
     build_personal_report_draft,
     build_travel_application_draft,
@@ -192,6 +193,25 @@ def command_add_invoice(args):
     print(json.dumps({"created": result, "report": verification}, ensure_ascii=False, indent=2))
 
 
+def command_add_manual_expense(args):
+    if not args.confirm_draft_write:
+        raise SystemExit("Refusing external writes without --confirm-draft-write")
+    api, gateway = _clients(args.username)
+    report = find_report(api, args.report)
+    fields = dict(value.split("=", 1) for value in args.field)
+    result = add_manual_expense(
+        api, gateway, report, args.expense_type, args.amount, args.date, fields
+    )
+    verification = verify_report_invoices(api, report["expenseReportOID"])
+    print(json.dumps({"created": result, "report": verification}, ensure_ascii=False, indent=2))
+
+
+def command_verify_report(args):
+    api, _ = _clients(args.username)
+    report = find_report(api, args.report)
+    print(json.dumps(verify_report_invoices(api, report["expenseReportOID"]), ensure_ascii=False, indent=2))
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Huilianyi draft-only API workflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -237,6 +257,21 @@ def build_parser():
     invoice.add_argument("--amount", type=float, required=True)
     invoice.add_argument("--confirm-draft-write", action="store_true")
     invoice.set_defaults(func=command_add_invoice)
+
+    manual = sub.add_parser("add-manual-expense", help="create a no-receipt manual expense")
+    manual.add_argument("--username", required=True)
+    manual.add_argument("--report", required=True)
+    manual.add_argument("--expense-type", required=True)
+    manual.add_argument("--amount", type=float, required=True)
+    manual.add_argument("--date", required=True)
+    manual.add_argument("--field", action="append", default=[], metavar="NAME=VALUE")
+    manual.add_argument("--confirm-draft-write", action="store_true")
+    manual.set_defaults(func=command_add_manual_expense)
+
+    verify = sub.add_parser("verify-report", help="read back expense and receipt state")
+    verify.add_argument("--username", required=True)
+    verify.add_argument("--report", required=True)
+    verify.set_defaults(func=command_verify_report)
     return parser
 
 

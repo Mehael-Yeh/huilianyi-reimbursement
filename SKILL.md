@@ -3,7 +3,7 @@ name: huilianyi-reimbursement
 description: "触发: 报销/差旅/汇联易/填报销单。读取历史校准并先分类票据；个人报销独立建单，差旅按申请审批通过后再关联报销的顺序创建；永不提交或删除。"
 license: MIT
 metadata:
-  version: 3.2.0
+  version: 3.3.0
   author: Hermes Agent
   platforms: [linux, windows, darwin]
   hermes:
@@ -197,6 +197,20 @@ python scripts/hly.py add-invoice \
 - `v5/invoices` 成功后会直接绑定费用行并更新报销总额，不需要手拼 `expenseReportInvoices`。
 
 完整配方见 `references/invoice-landing.md`。
+
+### 无票手录费用
+
+费用类型声明 `invoiceRequired=false` 且 `pasteInvoiceNeeded=false` 时，可完全跳过上传、OCR、查验和税额接口。使用 v6 保存无票费用：
+
+```bash
+python scripts/hly.py add-manual-expense \
+  --username <账号> --report <编辑中ER单号> \
+  --expense-type 出差补贴 --amount <金额> --date <YYYY-MM-DD> \
+  --field 补贴天数=<天数> --field 客户名称=<说明> \
+  --confirm-draft-write
+```
+
+流程为：历史同类无票费用取得字段结构 → 校验必填字段 → 默认分摊及申请预算关联 → `POST /invoice/api/validate/invoice/async` → `POST /invoice/api/v6/invoices`。请求必须为 `withReceipt=false`、空 `receiptList`。v5 在此租户的无票场景会返回服务器 500，禁止用于手录费用。
 
 ## Step 5：回读验收
 

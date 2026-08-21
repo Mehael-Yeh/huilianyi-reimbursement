@@ -62,3 +62,15 @@ body["valid"] = True
 `v5/invoices` 成功后会创建费用行、绑定发票并更新报告总额。不再手拼 `expenseReportInvoices`，也不再额外回存整单实体。
 
 实现见 `hly_workflow.add_invoice()`。
+
+## 无票手录费用
+
+已于 2026-08-22 对编辑中差旅报销完成端到端验证：不上传附件、不调用 OCR/查验，创建 1.00 元“出差补贴”后，报告总额和费用行数量均正确增加。
+
+1. 动态查询费用类型，确认 `invoiceRequired=false`、`pasteInvoiceNeeded=false`、允许手工创建。
+2. 从历史同类无票费用复制自定义字段结构并清空旧值，填写所有必填项。
+3. 调用默认分摊；有同类申请预算时传数值预算行 ID 列表，否则传空列表。
+4. 请求设置 `withReceipt=false`、`receiptList=[]`、`receipts=[]`。
+5. 先调用 `POST /invoice/api/validate/invoice/async`。
+6. 最终调用 `POST /invoice/api/v6/invoices`。本租户 v5 无票请求返回通用 500，v6 成功。
+7. 回读 invoices/v2，确认费用 `withReceipt=false` 且 `receiptList` 为空。

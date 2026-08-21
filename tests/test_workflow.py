@@ -215,6 +215,15 @@ class WorkflowTests(unittest.TestCase):
         for value in forbidden:
             self.assertNotIn(value, source)
 
+    def test_manual_expense_uses_no_receipt_v6_flow(self):
+        source = (ROOT / "scripts" / "hly_workflow.py").read_text(encoding="utf-8")
+        manual = source.split("def add_manual_expense(", 1)[1].split("def verify_report_invoices", 1)[0]
+        self.assertIn('"withReceipt": False', manual)
+        self.assertIn('"receiptList": []', manual)
+        self.assertIn('/invoice/api/validate/invoice/async', manual)
+        self.assertIn('/invoice/api/v6/invoices', manual)
+        self.assertNotIn("upload_invoice", manual)
+
 
 if __name__ == "__main__":
     unittest.main()
