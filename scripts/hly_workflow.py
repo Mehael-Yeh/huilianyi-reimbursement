@@ -679,14 +679,139 @@ def add_invoice(
     }
 
 
+def _manual_expense_template(api: Client, expense_type_name: str) -> dict[str, Any]:
+    for item in search_reports(api):
+        oid = report_oid(item)
+        if not oid:
+            continue
+        invoice_data = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={oid}"))
+        for view in (invoice_data.get("invoiceViewDTOMap") or {}).values():
+            if view.get("expenseTypeName") == expense_type_name and not view.get("withReceipt"):
+                return copy.deepcopy(view)
+    return {}
+
+
+def add_manual_expense(
+    api: Client,
+    gateway: Client,
+    report: dict[str, Any],
+    expense_type_name: str,
+    amount: float,
+    occurred_date: str | date,
+    field_values: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a no-receipt manual expense and bind it to an editing report."""
+    if report.get("status") != DRAFT_STATUS:
+        raise ValueError("manual expenses may only be added to an editing draft (status 1001)")
+    types = available_expense_types(api, report)
+    if expense_type_name not in types:
+        raise LookupError(f"expense type not available: {expense_type_name}")
+    expense_type = types[expense_type_name]
+    if expense_type.get("invoiceRequired") or expense_type.get("pasteInvoiceNeeded"):
+        raise ValueError(f"expense type requires a receipt: {expense_type_name}")
+    if not expense_type.get("isAbleToCreatedManually", True):
+        raise ValueError(f"expense type cannot be created manually: {expense_type_name}")
+    amount = round(float(amount), 2)
+    if amount <= 0:
+        raise ValueError("manual expense amount must be positive")
+
+    budget_match = {
+        "expenseType": canonical_expense_type(expense_type_name),
+        "applicationCustomBudgetId": [], "applicationAmount": 0.0,
+        "budgetLineCount": 0,
+        "mode": "personal-expense" if not report.get("applicationOID") else "manual-expense",
+    }
+    if report.get("applicationOID"):
+        budget_match = application_budget_match(
+            get_application(api, report["applicationOID"]), expense_type_name
+        )
+    expense_type_id = str(expense_type.get("expenseTypeId") or expense_type.get("id"))
+    apportionment = unwrap_rows(api.request(
+        "/api/expense/default/apportionment", "POST", {
+            "expenseReportOID": report["expenseReportOID"],
+            "expenseTypeId": expense_type_id,
+            "amount": amount, "currency": "CNY", "ownerOID": report["applicantOID"],
+            "merge": True,
+            "applicationCustomBudgetId": budget_match["applicationCustomBudgetId"],
+            "prepaymentLineIdList": [], "paymentCompanyOID": report.get("companyOID"),
+        }
+    ))
+    payload = _manual_expense_template(api, expense_type_name)
+    if not payload:
+        raise LookupError(f"no historical no-receipt template found: {expense_type_name}")
+    data = payload.get("data") or []
+    for field in data:
+        key = field.get("name") or field.get("messageKey")
+        if field.get("fieldType") == "ATTACHMENTS":
+            field["value"] = field["showValue"] = ""
+        elif key in field_values:
+            field["value"] = field["showValue"] = str(field_values[key])
+        else:
+            field["value"] = field["showValue"] = ""
+        if field.get("required") and not field.get("value"):
+            raise ValueError(f"required manual expense field missing: {key}")
+    local_date = _parse_date(occurred_date)
+    china = timezone(timedelta(hours=8))
+    created = datetime.combine(local_date, dt_time.min, tzinfo=china).astimezone(timezone.utc)
+    for key in (
+        "id", "invoiceOID", "entityOID", "expenseReportInvoiceOID", "expenseReportOID",
+        "createTime", "lastModifiedDate", "invoiceLabels", "invoiceLabelDTOS", "approvalOperates",
+        "expenseCode", "paymentScheduleId", "referenceId", "applicationNumber", "applicationTitle",
+    ):
+        payload.pop(key, None)
+    payload.update({
+        "expenseReportOID": report["expenseReportOID"],
+        "ownerOID": report["applicantOID"], "userOID": report["applicantOID"],
+        "reimbursementUserOID": report["applicantOID"],
+        "expenseTypeId": expense_type_id,
+        "expenseTypeOID": expense_type.get("expenseTypeOID") or expense_type.get("oid"),
+        "expenseTypeName": expense_type_name,
+        "expenseTypeCode": expense_type.get("code"),
+        "expenseTypeIconName": expense_type.get("iconName"),
+        "classificationCode": expense_type.get("classificationCode"),
+        "expenseTypeSubsidyType": expense_type.get("subsidyType", 0),
+        "amount": amount, "originalAmount": amount,
+        "currencyCode": "CNY", "invoiceCurrencyCode": "CNY",
+        "createdDate": created.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "currencyDate": f"{local_date.isoformat()} 00:00:00",
+        "companyOID": report.get("companyOID"), "paymentType": 1001,
+        "withReceipt": False, "receiptList": [], "receipts": [],
+        "attachments": [], "data": data, "expenseApportion": apportionment,
+        "comment": "", "valid": False, "createInvoice": True,
+        "applicationList": [], "relatedApplicationItineraryBudgetVOList": None,
+    })
+    validation = unwrap_row(
+        gateway.request("/invoice/api/validate/invoice/async?roleType=TENANT", "POST", payload)
+    )
+    if isinstance(validation, dict) and validation.get("isError"):
+        raise ValueError(f"manual expense validation failed: {validation.get('validationErrors')}")
+    query = (
+        "/invoice/api/v6/invoices?roleType=TENANT&isDateCombinedUTC=false&utcTime=true"
+        "&needValidateExpBaseAmountOverReceipt=true"
+    )
+    created_expense = unwrap_row(gateway.request(query, "POST", payload))
+    return {
+        "invoiceOID": created_expense.get("invoiceOID") or created_expense.get("entityOID"),
+        "expenseType": expense_type_name, "amount": amount,
+        "withReceipt": False, "budgetMatch": budget_match,
+    }
+
+
 def verify_report_invoices(api: Client, report_oid_value: str) -> dict[str, Any]:
     detail = get_report(api, report_oid_value)
     invoice_data = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={report_oid_value}"))
+    views = list((invoice_data.get("invoiceViewDTOMap") or {}).values())
     return {
         "businessCode": detail.get("businessCode"),
         "status": detail.get("status"),
         "totalAmount": detail.get("totalAmount"),
         "invoiceCount": len(invoice_data.get("expenseReportInvoices") or []),
+        "manualExpenseCount": sum(1 for view in views if not view.get("withReceipt")),
+        "expenses": [
+            {"expenseType": view.get("expenseTypeName"), "amount": view.get("amount"),
+             "withReceipt": bool(view.get("withReceipt")), "receiptCount": len(view.get("receiptList") or [])}
+            for view in views
+        ],
         "groups": [
             {
                 "categoryName": group.get("categoryName"),
