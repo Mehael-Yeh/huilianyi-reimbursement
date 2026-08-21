@@ -1,6 +1,6 @@
 # Historical documentation — sanitized
 
-This historical version of `references/form-structure.md` contained tenant-specific business examples.
+This historical version of `references/workflow-model.md` contained tenant-specific business examples.
 Those examples, including identities, identifiers, amounts and itinerary details,
 have been removed from repository history. No original business values are retained here.
 
