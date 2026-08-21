@@ -20,6 +20,7 @@ from hly_api import Client, unwrap_row, unwrap_rows
 
 DRAFT_STATUS = 1001
 APPROVED_APPLICATION_STATUS = 1003
+TRAVEL_TYPE_ALIASES = {"市内交通费": "其他交通", "其他交通费": "其他交通"}
 
 
 def business_code(item: dict[str, Any]) -> str | None:
@@ -87,15 +88,61 @@ def _field_map(values: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]
     return result
 
 
+def canonical_expense_type(name: str) -> str:
+    return TRAVEL_TYPE_ALIASES.get(name, name)
+
+
+def application_budget_summary(application: dict[str, Any]) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for line in (application.get("budgetDetailDTO") or {}).get("budgetDetail") or []:
+        name = canonical_expense_type((line.get("expenseType") or {}).get("name") or "")
+        if name:
+            result[name] = round(result.get(name, 0.0) + float(line.get("amount") or 0), 2)
+    return result
+
+
+def report_expense_summary(invoice_data: dict[str, Any]) -> dict[str, float]:
+    result: dict[str, float] = {}
+    views = (invoice_data.get("invoiceViewDTOMap") or {}).values()
+    for invoice in views:
+        name = canonical_expense_type(invoice.get("expenseTypeName") or "")
+        if name:
+            result[name] = round(result.get(name, 0.0) + float(invoice.get("amount") or 0), 2)
+    return result
+
+
+def compare_travel_amounts(application: dict[str, Any], invoice_data: dict[str, Any]) -> dict[str, Any]:
+    planned = application_budget_summary(application)
+    reimbursed = report_expense_summary(invoice_data)
+    differences = []
+    for name in sorted(set(planned) | set(reimbursed)):
+        delta = round(reimbursed.get(name, 0.0) - planned.get(name, 0.0), 2)
+        if delta:
+            differences.append(
+                {"expenseType": name, "applicationAmount": planned.get(name, 0.0),
+                 "reportAmount": reimbursed.get(name, 0.0), "difference": delta}
+            )
+    return {
+        "application": planned,
+        "report": reimbursed,
+        "applicationTotal": round(sum(planned.values()), 2),
+        "reportTotal": round(sum(reimbursed.values()), 2),
+        "matches": not differences,
+        "differences": differences,
+    }
+
+
 def build_history_model(api: Client, limit: int = 100) -> dict[str, Any]:
     """Read history and model application/report/invoice relationships."""
     applications = []
     known_application_oids = set()
+    application_details = {}
     for item in search_applications(api, limit):
         oid = application_oid(item)
         if not oid:
             continue
         detail = get_application(api, oid)
+        application_details[oid] = detail
         known_application_oids.add(oid)
         travel = detail.get("travelApplication") or {}
         fields = _field_map(detail.get("custFormValues"))
@@ -113,6 +160,7 @@ def build_history_model(api: Client, limit: int = 100) -> dict[str, Any]:
                 "travelDays": travel.get("travelDays"),
                 "participantNum": travel.get("participantNum"),
                 "totalAmount": detail.get("totalAmount"),
+                "budgetByExpenseType": application_budget_summary(detail),
                 "companyOID": (fields.get("field_3917") or {}).get("value"),
                 "companyName": (fields.get("field_3917") or {}).get("showValue"),
                 "departmentOID": (fields.get("field_0001") or {}).get("value"),
@@ -130,6 +178,9 @@ def build_history_model(api: Client, limit: int = 100) -> dict[str, Any]:
         detail = get_report(api, oid)
         invoice_data = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={oid}"))
         linked_oid = detail.get("applicationOID")
+        comparison = None
+        if linked_oid in application_details:
+            comparison = compare_travel_amounts(application_details[linked_oid], invoice_data)
         reports.append(
             {
                 "businessCode": detail.get("businessCode"),
@@ -145,6 +196,8 @@ def build_history_model(api: Client, limit: int = 100) -> dict[str, Any]:
                 "linkDTOCount": len(detail.get("expenseReportApplicationDTOS") or []),
                 "applicationStartAndEndDateMap": detail.get("applicationStartAndEndDateMap") or {},
                 "invoiceCount": len(invoice_data.get("expenseReportInvoices") or []),
+                "expenseByType": report_expense_summary(invoice_data),
+                "applicationReportComparison": comparison,
                 "invoiceGroups": [
                     {
                         "categoryName": group.get("categoryName"),
@@ -201,8 +254,11 @@ def build_travel_application_draft(
     participant: dict[str, Any],
     start: str | date,
     end: str | date,
+    expense_plan: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Build a header-complete, zero-budget travel application draft."""
+    """Build a travel application whose budget mirrors classified travel expenses."""
+    if not expense_plan:
+        raise ValueError("travel application requires a non-empty expense plan")
     start_iso, end_iso, travel_days = application_date_values(start, end)
     fields = _reset_form_values(template.get("custFormValues"))
     for field in fields:
@@ -228,6 +284,48 @@ def build_travel_application_draft(
     for key in ("id", "applicationOID", "businessCode", "createdDate", "lastModifiedDate"):
         if key in travel:
             travel[key] = None
+    budget_templates = {}
+    for existing in (template.get("budgetDetailDTO") or {}).get("budgetDetail") or []:
+        name = canonical_expense_type((existing.get("expenseType") or {}).get("name") or "")
+        if name and name not in budget_templates:
+            budget_templates[name] = existing
+    merged_plan: dict[str, float] = {}
+    for requested in expense_plan:
+        name = canonical_expense_type(str(requested.get("expenseType") or ""))
+        amount = round(float(requested.get("amount") or 0), 2)
+        if not name or amount <= 0:
+            raise ValueError("every travel expense plan line needs expenseType and a positive amount")
+        merged_plan[name] = round(merged_plan.get(name, 0.0) + amount, 2)
+    missing = sorted(set(merged_plan) - set(budget_templates))
+    if missing:
+        raise LookupError("application template lacks budget types: " + ", ".join(missing))
+
+    budget_lines = []
+    for name, amount in merged_plan.items():
+        line = copy.deepcopy(budget_templates[name])
+        for key in ("id", "budgetOID", "applicationOID", "createdDate", "lastModifiedDate"):
+            if key in line:
+                line[key] = None
+        line.update(
+            {"amount": amount, "baseCurrencyAmount": amount, "taxExcBaseCurrencyAmount": amount}
+        )
+        for apportionment in line.get("apportionmentDTOList") or []:
+            for key in (
+                "id", "apportionmentOID", "entityOID", "createdDate", "lastModifiedDate",
+                "expenseBudgetOID",
+            ):
+                if key in apportionment:
+                    apportionment[key] = None
+            apportionment.update(
+                {"amount": amount, "baseCurrencyAmount": amount,
+                 "reimbursementAmount": 0.0, "baseReimbursementAmount": 0.0}
+            )
+            for item in apportionment.get("costCenterItems") or []:
+                item["entityOID"] = None
+                item["costCenterItemID"] = None
+        budget_lines.append(line)
+    total_budget = round(sum(merged_plan.values()), 2)
+
     travel.update(
         {
             "applicationOID": None,
@@ -241,8 +339,8 @@ def build_travel_application_draft(
             "hotelBookingClerkName": participant["fullName"],
             "trainBookingClerkOID": participant["userOID"],
             "trainBookingClerkName": participant["fullName"],
-            "baseCurrencyAmount": 0.0,
-            "totalBudget": 0.0,
+            "baseCurrencyAmount": total_budget,
+            "totalBudget": total_budget,
             "travelItinerarys": [],
             "travelItineraryBookingClerkDTOs": [],
         }
@@ -269,6 +367,7 @@ def build_travel_application_draft(
         "travelApplication": travel,
         "applicationParticipant": {"applicationOID": None, "participantOID": participant_oid},
         "applicationParticipants": [person],
+        "budgetDetailDTO": {"amount": total_budget, "budgetDetail": budget_lines},
     }
 
 

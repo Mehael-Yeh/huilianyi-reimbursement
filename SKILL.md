@@ -1,11 +1,11 @@
 ---
 name: huilianyi-reimbursement
-description: "触发: 报销/差旅/汇联易/填报销单。读取历史校准→发票分类→创建差旅申请、差旅报销、个人报销草稿→API上传识别并落账；永不提交或删除。"
-version: 3.0.0
-author: Hermes Agent
+description: "触发: 报销/差旅/汇联易/填报销单。读取历史校准并先分类票据；个人报销独立建单，差旅按申请审批通过后再关联报销的顺序创建；永不提交或删除。"
 license: MIT
-platforms: [linux, windows, darwin]
 metadata:
+  version: 3.1.0
+  author: Hermes Agent
+  platforms: [linux, windows, darwin]
   hermes:
     tags: [汇联易, 报销, 差旅, 发票, huilianyi, helios]
     related_skills: [hermes-gateway-service]
@@ -21,7 +21,8 @@ metadata:
 - 只创建或编辑 `status=1001`（编辑中）的草稿。
 - 已有单据一律保留；测试草稿也不自动清理。
 - 差旅报销只能关联 `status=1003` 且 `closed=false` 的差旅申请。
-- 费用字段、预算、公司归属或类别不确定时先问用户，不猜。
+- 费用字段、公司归属或类别不确定时先问用户，不猜。
+- 差旅申请预算默认按已分类的实际差旅费用逐类填入；不得再创建零预算申请。
 - 密码只从交互输入或 `HLY_PASSWORD` 环境变量读取，绝不写入仓库、日志、状态文件或输出。
 - 发票只允许加入编辑中草稿；已审核/已付单据不得修改。
 
@@ -64,13 +65,15 @@ python scripts/hly.py history --username <账号> --output tmp/hly-history.json
 - `custFormValues` 中“关联申请”可以仍为 `null`；真正关系以上述三处为准。
 - 个人报销必须满足：顶层申请字段为 `null`、DTO 数组为空、日期映射为空。
 - 已付差旅报销可能使申请自动 `closed=true`；禁止把已关闭申请用于新报销。
-- 申请预算是上限/计划，不要求等于最终报销金额。
+- 正常流程是出差前提交并通过差旅申请，出差后关联报销。
+- 当前业务允许事后补流程：先按已发生费用创建并审批差旅申请，再创建关联的差旅报销。
+- 事后补流程中，申请与报销的费用分类、金额通常逐项一致；不一致时必须输出差异，不能静默复制或忽略。
 - 报销公司可能与申请公司不同。优先按发票抬头和近期同类报销判断，不得直接复制申请公司。
 - 申请日期使用中国时区转 UTC；报销关联日期使用汇联易的“本地墙上时间+Z”格式。使用脚本转换，不手拼。
 
 详细说明见 `references/workflow-model.md`。
 
-## Step 2：发票识别与分类
+## Step 2：先识别和分类全部票据
 
 规则见 `references/invoice-classification.md`。核心：
 
@@ -83,13 +86,27 @@ python scripts/hly.py history --username <账号> --output tmp/hly-history.json
 
 输出清单必须包含：文件、发票号、日期、含税金额、类别、目标单据、是否计入合计、待核对原因。
 
+分类完成后先生成统一费用计划。`travel` 中的分类和金额同时驱动差旅申请预算与后续差旅报销；`personal` 只进入个人报销。例如：
+
+```json
+{
+  "travel": [
+    {"expenseType": "过路费", "amount": 14.60},
+    {"expenseType": "酒店", "amount": 220.15}
+  ],
+  "personal": [
+    {"expenseType": "礼品费", "amount": 138.00}
+  ]
+}
+```
+
 ## Step 3：创建草稿
 
 ### 差旅申请单
 
 必须有：费用公司/部门、代理人、参与人、起止日期、交通工具、事由、是否总务订机票。
 
-当前脚本创建“表头完整、预算为 0”的草稿。若公司要求资金明细/预算行，必须向用户确认费用类型和金额；在预算行 API 尚未实测前，不得伪造预算结构。
+当前事后补流程必须用 `travel` 费用计划创建资金明细，逐类金额等于已发生的差旅费用。预算行结构从历史同类申请复制并清除旧单据身份；模板缺少某个费用类型时停止并换用包含该类型的历史模板，不伪造 OID。
 
 ### 差旅报销单
 
@@ -97,23 +114,48 @@ python scripts/hly.py history --username <账号> --output tmp/hly-history.json
 - 日期和参与人来自目标申请。
 - 公司/部门来自票据抬头与历史校准。
 - 新草稿初始金额为 0，随后由 `v5/invoices` 费用行自动累计。
+- 加票完成后，将报销费用逐类与申请预算比较；通常应一致，历史例外需要明确说明。
 
 ### 个人报销单
 
 - 不关联任何申请。
 - 事由根据票据写成可解释的业务描述，如“客户送礼，请客招待”。
 
-创建三类草稿：
+### 当前事后补流程的强制顺序
+
+1. 分类全部票据，分离 `travel` 与 `personal`。
+2. 创建含完整分类和金额的差旅申请草稿。
+3. 停止，等待用户在汇联易提交并审批通过申请；skill 不代为提交或审批。
+4. 回读确认申请 `status=1003` 且 `closed=false`。
+5. 创建关联该申请的差旅报销草稿；个人报销可在这一阶段独立创建。
+6. 将原费用计划中的差旅票据加入差旅报销，个人票据加入个人报销。
+7. 审计差旅申请与差旅报销的分类、金额差异。
+
+第一阶段只创建差旅申请：
 
 ```bash
-python scripts/hly.py create-drafts \
+python scripts/hly.py create-application \
   --username <账号> \
-  --target-application <已审核TZ单号> \
+  --template-application <包含所需费用类型的历史TZ单号> \
   --agent <代理人姓名> \
   --participant <参与人姓名> \
+  --start <YYYY-MM-DD> --end <YYYY-MM-DD> \
+  --travel-plan tmp/expense-plan.json \
   --state tmp/hly-state.json \
   --confirm-draft-write
 ```
+
+申请由用户审批通过后，第二阶段创建报销单：
+
+```bash
+python scripts/hly.py create-reports \
+  --username <账号> \
+  --target-application <刚审批通过的TZ单号> \
+  --state tmp/hly-state.json \
+  --confirm-draft-write
+```
+
+只有存在个人报销票据时，才在第二阶段额外传入 `--create-personal-report`；个人报销不会关联上述差旅申请。
 
 状态文件用于防止重跑重复建单；其中不保存 token 或密码。
 
@@ -164,7 +206,14 @@ python scripts/hly.py add-invoice \
 - 个人报销无申请关系。
 - `invoiceCount` 等于已成功落账票数。
 - 发票分组 `totalInvoiceAmount` 与单据 `totalAmount` 一致（浮点展示按货币精度比较）。
+- 差旅申请预算与差旅报销费用按规范化后的类别逐项比较；`其他交通` 与历史中的 `市内交通费` 视为同类。
+- 默认要求分类和金额一致；若存在实际报销减少等合理例外，输出每类申请额、报销额和差额。
 - 不以 HTTP 成功代替业务验收。
+
+```bash
+python scripts/hly.py audit-travel-pair \
+  --username <账号> --application <TZ单号> --report <ER单号>
+```
 
 ## 参考
 

@@ -8,9 +8,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from hly_workflow import (  # noqa: E402
     application_date_values,
+    build_travel_application_draft,
     build_personal_report_draft,
     build_travel_report_draft,
     build_v5_body,
+    compare_travel_amounts,
     report_date_values,
 )
 
@@ -29,6 +31,51 @@ def field(code, value=None, message_key=None):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_travel_application_budget_matches_classified_plan(self):
+        budget_line = {
+            "id": "old", "budgetOID": "old-budget", "applicationOID": "old-app",
+            "amount": 1000, "baseCurrencyAmount": 1000,
+            "expenseType": {"name": "酒店", "expenseTypeOID": "hotel"},
+            "apportionmentDTOList": [{
+                "id": 1, "apportionmentOID": "old", "entityOID": "old-app",
+                "expenseBudgetOID": "old-budget", "amount": 1000,
+                "baseCurrencyAmount": 1000, "costCenterItems": [{"entityOID": "old-app"}],
+            }],
+        }
+        template = {
+            "formOID": "form", "companyOID": "company", "corporationOID": "corp",
+            "departmentOID": "dept", "custFormValues": [], "travelApplication": {},
+            "budgetDetailDTO": {"amount": 1000, "budgetDetail": [budget_line]},
+        }
+        agent = {"userOID": "agent", "fullName": "代理人"}
+        participant = {"userOID": "person", "fullName": "参与人", "departmentOID": "dept"}
+        result = build_travel_application_draft(
+            template, agent, participant, "2026-06-02", "2026-06-30",
+            [{"expenseType": "酒店", "amount": 220.15}],
+        )
+        self.assertEqual(result["travelApplication"]["totalBudget"], 220.15)
+        self.assertEqual(result["budgetDetailDTO"]["amount"], 220.15)
+        line = result["budgetDetailDTO"]["budgetDetail"][0]
+        self.assertEqual(line["amount"], 220.15)
+        self.assertIsNone(line["budgetOID"])
+        self.assertEqual(line["apportionmentDTOList"][0]["amount"], 220.15)
+
+    def test_travel_pair_comparison_allows_historical_type_alias(self):
+        application = {"budgetDetailDTO": {"budgetDetail": [
+            {"expenseType": {"name": "其他交通"}, "amount": 20},
+            {"expenseType": {"name": "酒店"}, "amount": 100},
+        ]}}
+        invoices = {"invoiceViewDTOMap": {
+            "a": {"expenseTypeName": "市内交通费", "amount": 20},
+            "b": {"expenseTypeName": "酒店", "amount": 90},
+        }}
+        result = compare_travel_amounts(application, invoices)
+        self.assertFalse(result["matches"])
+        self.assertEqual(result["differences"], [{
+            "expenseType": "酒店", "applicationAmount": 100.0,
+            "reportAmount": 90.0, "difference": -10.0,
+        }])
+
     def test_application_dates_use_china_timezone(self):
         start, end, days = application_date_values("2026-06-02", "2026-06-30")
         self.assertEqual(start, "2026-06-01T16:00:00Z")
