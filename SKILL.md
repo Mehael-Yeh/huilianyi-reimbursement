@@ -99,9 +99,16 @@ python scripts/hly.py history --username <账号> --output tmp/hly-history.json
 
 规则见 `references/invoice-classification.md`。核心：
 
+**发票交付格式（可直接丢进目录/压缩包）：**
+- **PDF**（.pdf）：电子发票、扫描件（主格式）
+- **图片**（.png/.jpg/.jpeg）：票据照片（作为附件）
+- **里程表**（.xls/.xlsx/.xlsm）：里程补贴附件
+- **压缩包**（.zip/.rar/.7z）：支持自动解压后递归扫描（分类引擎 `_expand_archives`）
+- 直接丢一个目录（含子目录）或压缩包进来均可，引擎递归遍历并解压。
+
 - 差旅：过路费、酒店、停车费、打车费、其他交通。
 - 个人：餐费、礼品费、里程补贴。
-- 餐饮金额 `>80` 元归礼品/招待；`80` 元整仍归餐费。
+- 餐饮金额 `>40` 元归礼品/招待；`40` 元及以下仍归餐费。
 - 通行费汇总单、行程单仅作附件，不重复计金额。
 - 同发票号码只计一次。
 - 先核对发票抬头，再决定费用承担公司。
@@ -181,7 +188,14 @@ python scripts/hly.py create-reports \
   --confirm-draft-write
 ```
 
-只有存在个人报销票据时，才在第二阶段额外传入 `--create-personal-report`；个人报销不会关联上述差旅申请。
+**个人报销单可独立提前生成，不依赖差旅申请审批**：它不关联任何申请单（无等待环节），只要存在`personal`票据即可直接调用。可在阶段一同时完成，也可单独在任意时点生成：
+
+```bash
+python scripts/hly.py create-reports --username <账号> \
+  --create-personal-report --state tmp/hly-state.json --confirm-draft-write
+```
+
+只有存在个人报销票据时，才额外传入 `--create-personal-report`；个人报销不会关联上述差旅申请。因此个人报销是"生成即完成"，无需经历差旅那种"建申请→等审批→再关联"的两阶段。
 
 状态文件用于防止重跑重复建单；其中不保存 token 或密码。
 
@@ -207,6 +221,8 @@ python scripts/hly.py add-invoice \
   --amount <含税金额> \
   --confirm-draft-write
 ```
+
+**增量报销与去重（支持会话过期后继续追加）**：`add-invoice`/`add-manual-expense` 先按指定 ER 单号定位已有草稿（不新建），并在 OCR 拿到发票号后与单内已有发票号比对——**重复票跳过并返回 `duplicate:true` 提示，新票才落账**。因此同一 ER 单可分多次追加发票，跨会话/会话过期也安全：再次上传已存在的发票只会被提醒、不会重复绑定。用 `verify-report` 可随时查看单内全部发票号。
 
 关键规则：
 
@@ -258,6 +274,16 @@ python scripts/hly.py add-manual-expense \
 python scripts/hly.py audit-travel-pair \
   --username <账号> --application <TZ单号> --report <ER单号>
 ```
+
+**回读验收后必须给用户一段中文简报告（不是只贴 JSON）**，包含：
+- 本次共处理几张发票、分属哪些类别；
+- 差旅申请预算 vs 报销费用：每类申请额/报销额/张数/差额；
+- 个人报销单独说明（不关联申请，已独立生成）；
+- 重复发票与待核对项列表（提示用户；
+- 是否有新增/未覆盖的类别（标记 manual-expense，不判失败）；
+- 明确的下一步：哪些单已建好草稿待你在网页提交审批。
+
+报告用条目式中文，先给结论（成功/待办），再给明细，符合用户"简短口头版"偏好。
 
 ## 参考
 
