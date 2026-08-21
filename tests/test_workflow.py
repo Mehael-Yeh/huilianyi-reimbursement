@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from hly_workflow import (  # noqa: E402
     application_date_values,
+    application_budget_match,
     build_travel_application_draft,
     build_personal_report_draft,
     build_travel_report_draft,
@@ -70,11 +71,43 @@ class WorkflowTests(unittest.TestCase):
             "b": {"expenseTypeName": "酒店", "amount": 90},
         }}
         result = compare_travel_amounts(application, invoices)
-        self.assertFalse(result["matches"])
-        self.assertEqual(result["differences"], [{
-            "expenseType": "酒店", "applicationAmount": 100.0,
-            "reportAmount": 90.0, "difference": -10.0,
-        }])
+        self.assertFalse(result["amountsEqual"])
+        self.assertTrue(result["allReportCategoriesCovered"])
+        hotel = next(row for row in result["categories"] if row["expenseType"] == "酒店")
+        self.assertEqual(hotel["difference"], -10.0)
+        self.assertEqual(hotel["invoiceCount"], 1)
+
+    def test_many_invoices_reuse_all_same_category_budget_line_ids(self):
+        application = {"budgetDetailDTO": {"budgetDetail": [
+            {"id": 101, "expenseType": {"name": "火车"}, "amount": 727},
+            {"id": 102, "expenseType": {"name": "火车"}, "amount": 553},
+            {"id": 103, "expenseType": {"name": "酒店"}, "amount": 300},
+        ]}}
+        result = application_budget_match(application, "火车")
+        self.assertEqual(result["applicationCustomBudgetId"], ["101", "102"])
+        self.assertEqual(result["applicationAmount"], 1280.0)
+        self.assertEqual(result["mode"], "application-budget")
+
+    def test_missing_application_category_becomes_manual_expense(self):
+        application = {"budgetDetailDTO": {"budgetDetail": []}}
+        result = application_budget_match(application, "停车费")
+        self.assertEqual(result["applicationCustomBudgetId"], [])
+        self.assertEqual(result["mode"], "manual-expense")
+
+    def test_unplanned_report_category_is_reported_not_rejected(self):
+        application = {"budgetDetailDTO": {"budgetDetail": [
+            {"expenseType": {"name": "酒店"}, "amount": 200},
+        ]}}
+        invoices = {"invoiceViewDTOMap": {
+            "a": {"expenseTypeName": "酒店", "amount": 220},
+            "b": {"expenseTypeName": "停车费", "amount": 30},
+        }}
+        result = compare_travel_amounts(application, invoices)
+        self.assertFalse(result["amountsEqual"])
+        self.assertFalse(result["allReportCategoriesCovered"])
+        parking = next(row for row in result["categories"] if row["expenseType"] == "停车费")
+        self.assertEqual(parking["coverage"], "manual-expense")
+        self.assertEqual(parking["invoiceCount"], 1)
 
     def test_application_dates_use_china_timezone(self):
         start, end, days = application_date_values("2026-06-02", "2026-06-30")
@@ -163,12 +196,18 @@ class WorkflowTests(unittest.TestCase):
     def test_v5_discards_provisional_invoice_oid_and_allows_null_receipt_id(self):
         receipt = {"id": None, "receiptOID": "receipt-1"}
         tax = {"invoiceOID": "provisional", "valid": False, "receiptList": [receipt]}
-        common = {"receiptList": [receipt], "amount": 14.6}
+        common = {
+            "receiptList": [receipt], "amount": 14.6,
+            "expenseApportion": [{"relationApplicationApportionmentGroupMd5": "group"}],
+        }
         body = build_v5_body(tax, common)
         self.assertNotIn("invoiceOID", body)
         self.assertTrue(body["valid"])
         self.assertIsNone(body["receiptList"][0]["id"])
         self.assertEqual(body["receiptList"][0]["receiptOID"], "receipt-1")
+        self.assertEqual(
+            body["expenseApportion"][0]["relationApplicationApportionmentGroupMd5"], "group"
+        )
 
     def test_workflow_source_contains_no_destructive_or_submit_endpoint(self):
         source = (ROOT / "scripts" / "hly_workflow.py").read_text(encoding="utf-8")

@@ -111,24 +111,48 @@ def report_expense_summary(invoice_data: dict[str, Any]) -> dict[str, float]:
     return result
 
 
+def application_budget_match(application: dict[str, Any], expense_type_name: str) -> dict[str, Any]:
+    name = canonical_expense_type(expense_type_name)
+    lines = [
+        line for line in (application.get("budgetDetailDTO") or {}).get("budgetDetail") or []
+        if canonical_expense_type((line.get("expenseType") or {}).get("name") or "") == name
+    ]
+    return {
+        "expenseType": name,
+        "applicationCustomBudgetId": [str(line["id"]) for line in lines if line.get("id") is not None],
+        "applicationAmount": round(sum(float(line.get("amount") or 0) for line in lines), 2),
+        "budgetLineCount": len(lines),
+        "mode": "application-budget" if lines else "manual-expense",
+    }
+
+
 def compare_travel_amounts(application: dict[str, Any], invoice_data: dict[str, Any]) -> dict[str, Any]:
     planned = application_budget_summary(application)
     reimbursed = report_expense_summary(invoice_data)
-    differences = []
+    invoice_counts: dict[str, int] = {}
+    for invoice in (invoice_data.get("invoiceViewDTOMap") or {}).values():
+        name = canonical_expense_type(invoice.get("expenseTypeName") or "")
+        if name:
+            invoice_counts[name] = invoice_counts.get(name, 0) + 1
+    categories = []
     for name in sorted(set(planned) | set(reimbursed)):
         delta = round(reimbursed.get(name, 0.0) - planned.get(name, 0.0), 2)
-        if delta:
-            differences.append(
-                {"expenseType": name, "applicationAmount": planned.get(name, 0.0),
-                 "reportAmount": reimbursed.get(name, 0.0), "difference": delta}
-            )
+        categories.append({
+            "expenseType": name,
+            "applicationAmount": planned.get(name, 0.0),
+            "reportAmount": reimbursed.get(name, 0.0),
+            "difference": delta,
+            "invoiceCount": invoice_counts.get(name, 0),
+            "coverage": "application-budget" if name in planned else "manual-expense",
+        })
     return {
         "application": planned,
         "report": reimbursed,
         "applicationTotal": round(sum(planned.values()), 2),
         "reportTotal": round(sum(reimbursed.values()), 2),
-        "matches": not differences,
-        "differences": differences,
+        "amountsEqual": all(not row["difference"] for row in categories),
+        "allReportCategoriesCovered": all(row["expenseType"] in planned for row in categories if row["reportAmount"]),
+        "categories": categories,
     }
 
 
@@ -566,6 +590,16 @@ def add_invoice(
     expense_type_id = str(expense_type.get("expenseTypeId") or expense_type.get("id"))
     expense_type_oid = expense_type.get("expenseTypeOID") or expense_type.get("oid")
     owner_oid = report["applicantOID"]
+    budget_match = {
+        "expenseType": canonical_expense_type(expense_type_name),
+        "applicationCustomBudgetId": [],
+        "applicationAmount": 0.0,
+        "budgetLineCount": 0,
+        "mode": "personal-expense" if not report.get("applicationOID") else "manual-expense",
+    }
+    if report.get("applicationOID"):
+        application = get_application(api, report["applicationOID"])
+        budget_match = application_budget_match(application, expense_type_name)
 
     upload = api.upload_invoice(file_path)
     ocr = gateway.request(
@@ -588,7 +622,7 @@ def add_invoice(
         {"expenseTypeId": expense_type_id, "receipts": [receipt]},
     )
     defaults = unwrap_row(defaults_value)
-    api.request(
+    apportionment = unwrap_rows(api.request(
         "/api/expense/default/apportionment",
         "POST",
         {
@@ -598,11 +632,11 @@ def add_invoice(
             "currency": "CNY",
             "ownerOID": owner_oid,
             "merge": True,
-            "applicationCustomBudgetId": [],
+            "applicationCustomBudgetId": budget_match["applicationCustomBudgetId"],
             "prepaymentLineIdList": [],
             "paymentCompanyOID": report.get("companyOID"),
         },
-    )
+    ))
     common = {
         "expenseReportOID": report_oid_value,
         "ownerOID": owner_oid,
@@ -621,6 +655,7 @@ def add_invoice(
         "valid": True,
         "attachments": [],
         "data": [],
+        "expenseApportion": apportionment,
     }
     tax_body = dict(defaults) if isinstance(defaults, dict) else {}
     tax_body.update(common)
@@ -640,6 +675,7 @@ def add_invoice(
         "receiptId": receipt.get("id"),
         "expenseType": expense_type_name,
         "amount": float(amount),
+        "budgetMatch": budget_match,
     }
 
 
