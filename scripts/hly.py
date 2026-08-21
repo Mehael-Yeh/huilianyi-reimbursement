@@ -7,6 +7,7 @@ import argparse
 import getpass
 import json
 import os
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -111,6 +112,67 @@ def command_history(args):
     model = build_history_model(api, args.limit)
     _write_json(args.output, model)
     print(json.dumps({"output": str(Path(args.output).resolve()), "applications": len(model["applications"]), "reports": len(model["reports"])}, ensure_ascii=False, indent=2))
+
+
+def command_profile(args):
+    """First-run profile: read history and distill the user's reimbursement habits
+    (companies, departments, agents, expense-type usage frequency) into a local,
+    human-reviewable profile. Nothing here is written into the skill; credentials
+    are never read back from this file."""
+    api, _ = _clients(args.username)
+    model = build_history_model(api, args.limit)
+    apps, reports = model["applications"], model["reports"]
+
+    companies = Counter()
+    company_oids = {}
+    departments = Counter()
+    department_oids = {}
+    agents = Counter()
+    agent_oids = {}
+    for app in apps:
+        cname, doid = app.get("companyName"), app.get("companyOID")
+        if cname:
+            companies[cname] += 1
+            if cname not in company_oids and doid:
+                company_oids[cname] = doid
+        dname, d_oid = app.get("departmentName"), app.get("departmentOID")
+        if dname:
+            departments[dname] += 1
+            if dname not in department_oids and d_oid:
+                department_oids[dname] = d_oid
+        aname, a_oid = app.get("agentName"), app.get("agentOID")
+        if aname:
+            agents[aname] += 1
+            if aname not in agent_oids and a_oid:
+                agent_oids[aname] = a_oid
+
+    expense_types = Counter()
+    for app in apps:
+        for name in (app.get("budgetByExpenseType") or {}):
+            expense_types[name] += 1
+    for report in reports:
+        for name in (report.get("expenseByType") or {}):
+            expense_types[name] += 1
+
+    profile = {
+        "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "disclaimer": "First-run review copy. OIDs are runtime caches only and MUST be re-validated against the live tenant before each fill (per form-fields.md). Confirm/correct values with the user before use.",
+        "habits": {
+            "companies": [{"name": n, "oid": company_oids.get(n), "uses": c} for n, c in companies.most_common()],
+            "departments": [{"name": n, "oid": department_oids.get(n), "uses": c} for n, c in departments.most_common()],
+            "agents": [{"name": n, "oid": agent_oids.get(n), "uses": c} for n, c in agents.most_common()],
+        },
+        "expenseTypeUsage": [{"name": n, "seenInDocuments": c} for n, c in expense_types.most_common()],
+        "samples": {
+            "applications": len(apps),
+            "reports": len(reports),
+            "recentApplications": [{"businessCode": a["businessCode"], "status": a["status"], "company": a["companyName"], "dept": a["departmentName"], "agent": a["agentName"], "budget": a["budgetByExpenseType"]} for a in apps[:5]],
+            "recentReports": [{"businessCode": r["businessCode"], "status": r["status"], "totalAmount": r["totalAmount"], "expenseByType": r["expenseByType"]} for r in reports[:5]],
+        },
+    }
+    _write_json(args.output, profile)
+    print(json.dumps({"profile": str(Path(args.output).resolve()), **{k: list(v) for k, v in
+        {"companies": companies.most_common(), "departments": departments.most_common(), "agents": agents.most_common(), "expenseTypes": expense_types.most_common()}.items()}}, ensure_ascii=False, indent=2))
 
 
 def command_create_application(args):
@@ -221,6 +283,12 @@ def build_parser():
     history.add_argument("--limit", type=int, default=100)
     history.add_argument("--output", default="tmp/hly-history.json")
     history.set_defaults(func=command_history)
+
+    profile = sub.add_parser("profile", help="first-run: distill reimbursement habits into a local profile for user review")
+    profile.add_argument("--username", required=True)
+    profile.add_argument("--limit", type=int, default=100)
+    profile.add_argument("--output", default="tmp/hly-profile.json")
+    profile.set_defaults(func=command_profile)
 
     application = sub.add_parser("create-application", help="create one planned travel application draft")
     application.add_argument("--username", required=True)
