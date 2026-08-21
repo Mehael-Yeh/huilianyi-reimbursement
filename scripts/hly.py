@@ -17,6 +17,7 @@ from hly_workflow import (
     build_personal_report_draft,
     build_travel_application_draft,
     build_travel_report_draft,
+    compare_travel_amounts,
     find_application,
     find_report,
     find_user,
@@ -45,6 +46,14 @@ def _write_json(path: str | Path, value):
 
 def _load_state(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _load_travel_plan(path: str | Path) -> list[dict]:
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    lines = value.get("travel") if isinstance(value, dict) else value
+    if not isinstance(lines, list) or not lines:
+        raise ValueError("travel plan must be a non-empty JSON array or an object with a travel array")
+    return lines
 
 
 def _save_state(path: Path, state: dict):
@@ -82,9 +91,9 @@ def _templates(api):
             personal_paid = detail
     travel = travel_paid or travel_fallback
     personal = personal_paid or personal_fallback
-    if travel and personal:
-        return travel, personal
-    raise LookupError("Could not find both a historical travel report and personal report template")
+    if not travel:
+        raise LookupError("Could not find a historical travel report template")
+    return travel, personal
 
 
 def _boolean_option(parser, name: str, default: bool = True):
@@ -103,30 +112,40 @@ def command_history(args):
     print(json.dumps({"output": str(Path(args.output).resolve()), "applications": len(model["applications"]), "reports": len(model["reports"])}, ensure_ascii=False, indent=2))
 
 
-def command_create_drafts(args):
+def command_create_application(args):
     if not args.confirm_draft_write:
         raise SystemExit("Refusing external writes without --confirm-draft-write")
     api, _ = _clients(args.username)
-    target = find_application(api, args.target_application)
-    if target.get("closed"):
-        raise SystemExit("Target application is closed and cannot be used for a new travel report")
+    template = find_application(api, args.template_application)
     agent = find_user(api, args.agent)
     participant = find_user(api, args.participant)
-    start, end = _local_dates(target)
-    travel_template, personal_template = _templates(api)
+    plan = _load_travel_plan(args.travel_plan)
     state_path = Path(args.state)
     state = _load_state(state_path)
-
-    if args.create_application and "travelApplication" not in state:
-        payload = build_travel_application_draft(target, agent, participant, start, end)
+    if "travelApplication" not in state:
+        payload = build_travel_application_draft(
+            template, agent, participant, args.start, args.end, plan
+        )
         created = save_application_draft(api, payload)
         state["travelApplication"] = {
             "businessCode": created.get("businessCode"),
             "applicationOID": created.get("applicationOID") or created.get("entityOID"),
+            "plannedAmount": round(sum(float(line["amount"]) for line in plan), 2),
         }
         _save_state(state_path, state)
+    print(json.dumps({"state": str(state_path.resolve()), "drafts": state}, ensure_ascii=False, indent=2))
 
-    if args.create_travel_report and "travelReport" not in state:
+
+def command_create_reports(args):
+    if not args.confirm_draft_write:
+        raise SystemExit("Refusing external writes without --confirm-draft-write")
+    api, _ = _clients(args.username)
+    target = find_application(api, args.target_application)
+    start, end = _local_dates(target)
+    travel_template, personal_template = _templates(api)
+    state_path = Path(args.state)
+    state = _load_state(state_path)
+    if "travelReport" not in state:
         payload = build_travel_report_draft(travel_template, target, start, end)
         created = save_report_draft(api, payload)
         state["travelReport"] = {
@@ -137,6 +156,8 @@ def command_create_drafts(args):
         _save_state(state_path, state)
 
     if args.create_personal_report and "personalReport" not in state:
+        if personal_template is None:
+            raise LookupError("Could not find a historical personal report template")
         payload = build_personal_report_draft(personal_template, args.personal_title)
         created = save_report_draft(api, payload)
         state["personalReport"] = {
@@ -146,6 +167,19 @@ def command_create_drafts(args):
         _save_state(state_path, state)
 
     print(json.dumps({"state": str(state_path.resolve()), "drafts": state}, ensure_ascii=False, indent=2))
+
+
+def command_audit_travel_pair(args):
+    api, _ = _clients(args.username)
+    application = find_application(api, args.application)
+    report = find_report(api, args.report)
+    if report.get("applicationOID") != application.get("applicationOID"):
+        raise SystemExit("Report is not linked to the specified application")
+    invoices = api.request(
+        f"/api/expense/report/invoices/v2?expenseReportOID={report['expenseReportOID']}"
+    )
+    comparison = compare_travel_amounts(application, invoices.get("rows") or invoices)
+    print(json.dumps(comparison, ensure_ascii=False, indent=2))
 
 
 def command_add_invoice(args):
@@ -168,18 +202,32 @@ def build_parser():
     history.add_argument("--output", default="tmp/hly-history.json")
     history.set_defaults(func=command_history)
 
-    drafts = sub.add_parser("create-drafts", help="create editing drafts only")
-    drafts.add_argument("--username", required=True)
-    drafts.add_argument("--target-application", required=True)
-    drafts.add_argument("--agent", required=True)
-    drafts.add_argument("--participant", required=True)
-    drafts.add_argument("--personal-title", default="客户送礼，请客招待")
-    drafts.add_argument("--state", default="tmp/hly-state.json")
-    _boolean_option(drafts, "create-application")
-    _boolean_option(drafts, "create-travel-report")
-    _boolean_option(drafts, "create-personal-report")
-    drafts.add_argument("--confirm-draft-write", action="store_true")
-    drafts.set_defaults(func=command_create_drafts)
+    application = sub.add_parser("create-application", help="create one planned travel application draft")
+    application.add_argument("--username", required=True)
+    application.add_argument("--template-application", required=True)
+    application.add_argument("--agent", required=True)
+    application.add_argument("--participant", required=True)
+    application.add_argument("--start", required=True)
+    application.add_argument("--end", required=True)
+    application.add_argument("--travel-plan", required=True)
+    application.add_argument("--state", default="tmp/hly-state.json")
+    application.add_argument("--confirm-draft-write", action="store_true")
+    application.set_defaults(func=command_create_application)
+
+    reports = sub.add_parser("create-reports", help="create travel and optional personal report drafts")
+    reports.add_argument("--username", required=True)
+    reports.add_argument("--target-application", required=True)
+    reports.add_argument("--personal-title", default="客户送礼，请客招待")
+    reports.add_argument("--state", default="tmp/hly-state.json")
+    _boolean_option(reports, "create-personal-report", default=False)
+    reports.add_argument("--confirm-draft-write", action="store_true")
+    reports.set_defaults(func=command_create_reports)
+
+    audit = sub.add_parser("audit-travel-pair", help="compare linked application budget and report expenses")
+    audit.add_argument("--username", required=True)
+    audit.add_argument("--application", required=True)
+    audit.add_argument("--report", required=True)
+    audit.set_defaults(func=command_audit_travel_pair)
 
     invoice = sub.add_parser("add-invoice", help="upload/OCR/verify/classify/bind one invoice")
     invoice.add_argument("--username", required=True)
