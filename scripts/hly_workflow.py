@@ -616,6 +616,19 @@ def add_invoice(
     receipt = _verified_receipt(verified)
     receipt["pdfUrl"] = receipt.get("pdfUrl") or upload.get("fileURL") or upload.get("downloadUrl")
 
+    # Incremental dedup: if this invoice number already exists in the report, skip it.
+    invoice_no = str(receipt.get("invoiceNumber") or receipt.get("invoiceCode") or "").strip()
+    if invoice_no and invoice_no in existing_invoice_numbers(api, report_oid_value):
+        return {
+            "duplicate": True,
+            "invoiceNumber": invoice_no,
+            "invoiceOID": receipt.get("receiptOID"),
+            "receiptOID": receipt.get("receiptOID"),
+            "expenseType": expense_type_name,
+            "amount": float(amount),
+            "message": f"发票号 {invoice_no} 已存在于该报销单,跳过(不重复落账)",
+        }
+
     defaults_value = gateway.request(
         "/invoice/api/invoice/defaults?roleType=TENANT&isDateCombinedUTC=false",
         "POST",
@@ -797,6 +810,30 @@ def add_manual_expense(
     }
 
 
+def existing_invoice_numbers(api: Client, report_oid_value: str) -> set[str]:
+    """Return the set of invoice numbers already bound to a report (for dedup on incremental add)."""
+    invoice_data = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={report_oid_value}"))
+    numbers: set[str] = set()
+    # invoiceViewDTOMap keyed views may carry invoice number in nested receipt info.
+    for view in (invoice_data.get("invoiceViewDTOMap") or {}).values():
+        for key in ("invoiceNumber", "invoiceCode"):
+            v = view.get(key)
+            if v:
+                numbers.add(str(v).strip())
+        for receipt in view.get("receiptList") or []:
+            for key in ("invoiceNumber", "invoiceCode"):
+                v = receipt.get(key)
+                if v:
+                    numbers.add(str(v).strip())
+    # Fallback: iterate top-level expenseReportInvoices list.
+    for item in invoice_data.get("expenseReportInvoices") or []:
+        for key in ("invoiceNumber", "invoiceCode", "number"):
+            v = item.get(key)
+            if v:
+                numbers.add(str(v).strip())
+    return numbers
+
+
 def verify_report_invoices(api: Client, report_oid_value: str) -> dict[str, Any]:
     detail = get_report(api, report_oid_value)
     invoice_data = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={report_oid_value}"))
@@ -807,9 +844,14 @@ def verify_report_invoices(api: Client, report_oid_value: str) -> dict[str, Any]
         "totalAmount": detail.get("totalAmount"),
         "invoiceCount": len(invoice_data.get("expenseReportInvoices") or []),
         "manualExpenseCount": sum(1 for view in views if not view.get("withReceipt")),
+        "invoiceNumbers": sorted(existing_invoice_numbers(api, report_oid_value)),
         "expenses": [
             {"expenseType": view.get("expenseTypeName"), "amount": view.get("amount"),
-             "withReceipt": bool(view.get("withReceipt")), "receiptCount": len(view.get("receiptList") or [])}
+             "withReceipt": bool(view.get("withReceipt")), "receiptCount": len(view.get("receiptList") or []),
+             "invoiceNumbers": [
+                 str(r.get("invoiceNumber") or r.get("invoiceCode") or "").strip()
+                 for r in view.get("receiptList") or [] if r.get("invoiceNumber") or r.get("invoiceCode")
+             ]}
             for view in views
         ],
         "groups": [
