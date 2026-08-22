@@ -1,4 +1,5 @@
 import sys
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +8,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from hly_credentials import CredentialStore, SERVICE_NAME  # noqa: E402
 from hly_workflow import (  # noqa: E402
+    add_invoice_batch,
     application_date_values,
     application_budget_match,
     build_travel_application_draft,
@@ -64,6 +67,8 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertEqual(result["travelApplication"]["totalBudget"], 220.15)
         self.assertEqual(result["budgetDetailDTO"]["amount"], 220.15)
+        self.assertEqual(result["totalAmount"], 220.15)
+        self.assertEqual(result["baseCurrencyAmount"], 220.15)
         line = result["budgetDetailDTO"]["budgetDetail"][0]
         self.assertEqual(line["amount"], 220.15)
         self.assertIsNone(line["budgetOID"])
@@ -247,6 +252,72 @@ class WorkflowTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unsupported upload format"):
                     validate_upload_file(path)
 
+    def test_category_batch_creates_one_expense_line_with_many_receipts(self):
+        class FakeAPI:
+            def __init__(self):
+                self.uploads = []
+                self.calls = []
+
+            def upload_invoice(self, path):
+                self.uploads.append(str(path))
+                return {"fileURL": f"https://files/{Path(path).name}"}
+
+            def request(self, path, method="GET", payload=None):
+                self.calls.append((path, method, payload))
+                if path == "/api/expense/type/byUser":
+                    return {"rows": [{"name": "过路费", "expenseTypeId": "1", "expenseTypeOID": "type-1"}]}
+                if path.startswith("/api/expense/report/invoices/v2"):
+                    return {"rows": {"invoiceViewDTOMap": {}}}
+                if path == "/api/expense/default/apportionment":
+                    return {"rows": [{"amount": payload["amount"]}]}
+                raise AssertionError(path)
+
+        class FakeGateway:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, path, method="GET", payload=None):
+                self.calls.append((path, method, payload))
+                if "/receipt/ocr/" in path:
+                    return {"rows": {"receiptList": [
+                        {"invoiceNumber": f"INV-{index}", "totalAmount": 1000}
+                        for index, _ in enumerate(payload)
+                    ]}}
+                if "/receipt/verify/" in path:
+                    return {"rows": [
+                        {"invoiceInfo": {**wrapper["invoiceInfo"], "receiptOID": f"receipt-{index}", "unUsedAmount": 1000}}
+                        for index, wrapper in enumerate(payload)
+                    ]}
+                if "/invoice/defaults" in path:
+                    return {"rows": {"data": []}}
+                if "/invoice/tax/amount/" in path:
+                    return {"rows": {}}
+                if "/invoice/api/v5/invoices" in path:
+                    return {"rows": {"invoiceOID": "expense-line-1"}}
+                raise AssertionError(path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            files = []
+            for index in range(3):
+                path = Path(directory) / f"invoice-{index}.pdf"
+                path.write_bytes(b"pdf")
+                files.append({"path": str(path), "amount": 10})
+            api, gateway = FakeAPI(), FakeGateway()
+            report = {
+                "status": 1001, "expenseReportOID": "report-1", "applicantOID": "owner",
+                "formOID": "form", "docCompanyOID": "company", "companyOID": "company",
+            }
+            result = add_invoice_batch(api, gateway, report, files, "过路费")
+            self.assertEqual(result["invoiceOID"], "expense-line-1")
+            self.assertEqual(result["receiptCount"], 3)
+            self.assertEqual(result["amount"], 30.0)
+            self.assertEqual(len(api.uploads), 3)
+            self.assertEqual(sum("/receipt/ocr/" in call[0] for call in gateway.calls), 1)
+            self.assertEqual(sum("/receipt/verify/" in call[0] for call in gateway.calls), 1)
+            v5 = next(call for call in gateway.calls if "/invoice/api/v5/invoices" in call[0])
+            self.assertEqual(len(v5[2]["receiptList"]), 3)
+
+
     def test_receipt_amount_uses_tax_inclusive_fields_only(self):
         self.assertEqual(
             recognized_receipt_amount({
@@ -323,6 +394,34 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(date_value["startDate"], "2026-06-02T00:00:00Z")
         self.assertEqual(date_value["endDate"], "2026-06-30T23:59:59Z")
         self.assertEqual(date_value["duration"], 29.0)
+
+
+class CredentialTests(unittest.TestCase):
+    def test_first_use_stores_account_and_password_without_plaintext_secret(self):
+        class FakeKeyring:
+            def __init__(self):
+                self.values = {}
+
+            def set_password(self, service, username, password):
+                self.values[(service, username)] = password
+
+            def get_password(self, service, username):
+                return self.values.get((service, username))
+
+        with tempfile.TemporaryDirectory() as directory:
+            backend = FakeKeyring()
+            store = CredentialStore(Path(directory) / "credentials.json", backend)
+            checked = []
+            result = store.prompt_and_save(
+                lambda username, password: checked.append((username, password)),
+                input_fn=lambda _: "account-1",
+                password_fn=lambda _: "secret-1",
+            )
+            self.assertEqual((result.username, result.password), ("account-1", "secret-1"))
+            self.assertEqual(checked, [("account-1", "secret-1")])
+            self.assertEqual(json.loads(store.config_path.read_text(encoding="utf-8")), {"username": "account-1"})
+            self.assertEqual(backend.get_password(SERVICE_NAME, "account-1"), "secret-1")
+            self.assertNotIn("secret-1", store.config_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

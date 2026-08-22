@@ -17,9 +17,11 @@ python -m pip install -r huilianyi-reimbursement/requirements.txt
 
 向 Agent 上传票据，然后说明要创建差旅申请、差旅报销或个人报销。Agent 会读取本 Skill，补充询问缺少的信息，并在写入汇联易草稿前确认。
 
+首次使用会同时询问汇联易账号和密码：账号保存在本地配置中，密码保存在操作系统凭据库中。材料分类完成后，Agent 会主动询问本次报销的开始和结束日期。正常提报按费用类别批量处理，一类票据形成一条含多张票据的费用行；最后必须回读核验并生成 Excel 报销清单。
+
 支持 PDF、OFD、ZIP、XML；图片票据不会上传。ZIP 加密时，Agent 会向用户索取密码，密码不会写入仓库。
 
-本 Skill 只创建或编辑草稿，不提交、删除、关闭或撤回单据。Agent 的完整工作流见 [SKILL.md](SKILL.md)。
+本 Skill 全程使用汇联易 API，不操作浏览器；只创建或编辑草稿，不提交、删除、关闭或撤回单据。Agent 的完整工作流见 [SKILL.md](SKILL.md)。
 
 ## 许可证
 

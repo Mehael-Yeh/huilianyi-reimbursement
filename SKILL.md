@@ -3,14 +3,14 @@ name: huilianyi-reimbursement
 description: 使用汇联易 A2 API 校准历史习惯、识别和分类票据、创建差旅申请/差旅报销/个人报销草稿、保存费用并生成核对表。仅处理草稿，永不提交、删除、关闭或撤回单据。
 license: MIT
 metadata:
-  version: 4.2.0
+  version: 4.3.0
   author: Mehael Yeh
   platforms: [linux, windows, darwin]
 ---
 
 # 汇联易报销填报
 
-优先使用汇联易 A2 API 完成历史校准、票据识别、草稿创建、费用保存、回读验收和 Excel 核对表交付。浏览器仅用于 API 无法覆盖的人工字段。
+只使用汇联易 A2 API 完成历史校准、票据识别、草稿创建、费用保存、回读验收和 Excel 核对表交付。不得手动操作或自动化操作浏览器；若 API 缺少能力，停止写入并向用户说明具体缺口。
 
 ## 安全边界
 
@@ -18,7 +18,7 @@ metadata:
 - 不调用提交、删除、关闭、撤回端点；不自动清理已有单据或费用。
 - 差旅报销只关联 `status=1003` 且 `closed=false` 的差旅申请。
 - 个人报销不关联申请单。
-- 密码只从交互输入或 `HLY_PASSWORD` 读取，不写入文件、日志或输出。
+- 初次使用必须同时询问账号和密码，先验证登录，再把账号写入本地配置、密码写入操作系统凭据库。不得把密码写入普通文件、命令历史、日志或输出。
 - OID、表单和费用类型必须从当前租户动态查询，不能固化历史值。
 - 外部写入前需获得用户明确授权；一次授权不包含提交或清理权限。
 
@@ -30,6 +30,12 @@ python scripts/hly.py --help
 ```
 
 统一使用 `scripts/hly.py` 操作汇联易；票据预检使用 `scripts/invoice_extract.py`。支持上传 PDF、OFD、ZIP、XML，不上传图片格式票据。
+
+首次使用先初始化本地凭据；后续命令可省略 `--username`：
+
+```bash
+python scripts/hly.py credentials-init
+```
 
 ## 工作流
 
@@ -64,6 +70,8 @@ ZIP 若加密，先向用户索取密码；不得猜测、记录或写入仓库�
 
 分类后汇总为 `travel` 与 `personal` 两组。差旅申请预算按当前已知差旅类别汇总；预算类目是汇总池，不要求与每张发票一一对应。
 
+材料识别和分类完成后，必须主动询问用户本次报销的开始日期与结束日期。不得从文件夹名称、发票日期或拟关联的历史申请单中擅自推断。确认后的日期同时用于新建差旅申请和本次报销核对。
+
 ### 3. 创建草稿
 
 差旅申请以同类历史申请为模板，预算必须来自已确认的差旅分类汇总：
@@ -86,9 +94,21 @@ python scripts/hly.py create-reports \
 
 关联字段和日期语义见 [申请与报销关系](references/workflow-model.md) 与 [表单字段](references/form-fields.md)。
 
+保存草稿后必须回读差旅申请，确认顶层总额、`budgetDetailDTO.amount` 和各类别预算金额均与分类汇总一致；任一处为零或不一致都不算完成。
+
 ### 4. 保存费用
 
-有票费用：
+有票费用必须按“归属单据 + 费用类别”分组，一组创建一条费用行。每组 JSON 是非空的 `{path, amount}` 数组：
+
+```bash
+python scripts/hly.py add-invoice-batch \
+  --report <报销单号> --invoice-batch <本类别.json> \
+  --expense-type <费用类型> --confirm-draft-write
+```
+
+原始文件上传接口一次仍只接收一个文件，所以同一类别内并发上传原文件；随后整组只调用一次 OCR、一次批量查验和一次 V5 费用创建，并把所有有效票据放进同一条费用行。不要把发票打 ZIP 后当成一张票上传。已审批历史中同一费用行可包含数十张票据；只有 API 明确返回数量上限时才按稳定顺序分块。
+
+`add-invoice` 仅用于单票诊断或重试，不得作为正常批量提报的循环入口：
 
 ```bash
 python scripts/hly.py add-invoice \
@@ -134,13 +154,17 @@ python scripts/hly.py audit-travel-pair --username <账号> \
 
 费用保存和回读结束后，必须向用户交付 `.xlsx` 核对表，至少包含文件名、格式、发票号码、建议分类、归属单据、识别金额、金额来源、分类依据、置信度、核对状态、汇联易费用编号和保存状态。生成与验收要求见 [Excel 核对表](references/review-workbook.md)。
 
+最后一步必须运行一体化导出命令；未生成并校验 `.xlsx` 时，任务不得报告完成：
+
 ```bash
-python scripts/hly.py prepare-review --username <账号> \
-  --report <报销单号> --invoice-review tmp/invoice-review.json \
-  --output tmp/reimbursement-review.json
-python scripts/build_review_workbook.py \
-  tmp/reimbursement-review.json outputs/报销分类金额核对.xlsx
+python scripts/hly.py finalize-review \
+  --report <差旅报销单号> --report <个人报销单号> \
+  --invoice-review tmp/invoice-review.json \
+  --review-output tmp/reimbursement-review.json \
+  --xlsx-output outputs/报销分类金额核对.xlsx
 ```
+
+交付前应报告差旅申请单、关联申请单、两张报销单的单号和金额，以及 Excel 的绝对路径；不得回显账号或密码。
 
 ## 参考
 

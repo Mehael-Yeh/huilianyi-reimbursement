@@ -57,6 +57,13 @@ def merge_review_data(
                 match = candidates[0]
         if match:
             used_expenses.add(str(match.get("expenseOID")))
+        matched_numbers = (match or {}).get("invoiceNumbers") or []
+        final_amount = (
+            item.get("amount")
+            if match and len(matched_numbers) > 1
+            else (match or {}).get("amount") if match
+            else item.get("amount")
+        )
         rows.append({
             "fileName": item.get("fileName"),
             "format": "/".join(item.get("formats") or [item.get("format") or ""]),
@@ -66,7 +73,7 @@ def merge_review_data(
             "confirmedCategory": item.get("category") if not item.get("needsReview") else "",
             "reportGroup": item.get("reportGroup"),
             "recognizedAmount": item.get("amount") if item.get("countAmount", True) else None,
-            "finalAmount": (match or {}).get("amount") if match else item.get("amount"),
+            "finalAmount": final_amount,
             "amountSource": item.get("source"),
             "classificationBasis": "、".join(item.get("matchedKeywords") or []),
             "confidence": {"high": "高", "low": "低"}.get(item.get("confidence"), item.get("confidence")),
