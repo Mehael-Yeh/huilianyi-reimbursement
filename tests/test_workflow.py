@@ -19,6 +19,7 @@ from hly_workflow import (  # noqa: E402
     infer_hotel_cities,
     report_date_values,
     validate_manual_expense_values,
+    complete_manual_apportionment,
     validate_upload_file,
 )
 
@@ -262,6 +263,27 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('"paymentCompanyOID": None', manual)
         self.assertIn('"valid": False', manual)
         self.assertIn('field["value"] = None', manual)
+        self.assertIn('view.get("invoiceSaveStatus") in {None, 102}', source)
+
+    def test_manual_expense_completes_default_apportionment_skeleton(self):
+        rows = complete_manual_apportionment(
+            [{"costCenterItems": []}],
+            {
+                "applicantOID": "person-1",
+                "applicantName": "叶皓",
+                "docCompanyOID": "doc-company-oid",
+                "docCompanyName": "嘉兴锐石化工有限公司",
+                "docCompanyCode": "rs",
+            },
+            {"companyID": "doc-company-id", "ownerJob": {"employeeId": "241202623"}},
+            "expense-type-id",
+            100.0,
+        )
+        self.assertEqual(rows[0]["amount"], 100.0)
+        self.assertEqual(rows[0]["baseCurrencyAmount"], 100.0)
+        self.assertEqual(rows[0]["expenseTypeId"], "expense-type-id")
+        self.assertEqual(rows[0]["companyId"], "doc-company-id")
+        self.assertEqual(rows[0]["apportionmentCompanyOID"], "doc-company-oid")
 
     def test_hotel_fields_use_inferred_cities_and_full_report_range(self):
         cities = infer_hotel_cities(

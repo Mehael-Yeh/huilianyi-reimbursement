@@ -257,7 +257,7 @@ python scripts/hly.py add-manual-expense \
 
 出差补贴固定为 100 元/天，金额必须严格等于 `补贴天数 × 100`。客户名称允许留空；请求中按网页行为编码为 `value=null`、`showValue=""`，不得伪造测试文案。
 
-完整流程为：从无异步错误的历史同类无票费用读取完整详情 → 使用当前报销单的 `applicantJobId`，不要依赖可能已丢失岗位的历史 `FINISHED` DTO → 校验 100 元/天 → 默认分摊及申请预算关联 → `POST /invoice/api/validate/invoice/async` → 预校验无错才调用 `POST /invoice/api/v6/invoices` → 轮询回读。请求必须为 `withReceipt=false`、空 `receiptList`，并与网页草稿语义保持 `valid=false`、`paymentCompanyOID=null`。编辑中报销单的正常费用状态可以是 `SUBMITTED` 或 `FINISHED`；必须同时确认无 `INVOICE_ASYNC_ERROR`。总额或行数增加不能代替终态验收。
+完整流程为：从无异步错误的历史同类无票费用读取完整详情 → 使用当前报销单的 `applicantJobId`，不要依赖可能已丢失岗位的历史 `FINISHED` DTO → 校验 100 元/天 → 调用默认分摊并补齐接口省略的金额、币种、费用类型、单据公司和人员字段 → 申请预算关联 → `POST /invoice/api/validate/invoice/async` → 预校验无错才调用 `POST /invoice/api/v6/invoices` → 轮询回读。请求必须为 `withReceipt=false`、空 `receiptList`，并与网页草稿语义保持 `valid=false`、`paymentCompanyOID=null`。编辑中报销单的正常费用状态可以是 `SUBMITTED` 或 `FINISHED`；`invoiceSaveStatus=101` 是异步处理中，`100` 是失败，`102` 是异步保存成功，网页同步保存也可能为 `null`。成功状态还必须无 `INVOICE_ASYNC_ERROR`。总额或行数增加不能代替终态验收。
 
 ## Step 5：回读验收
 

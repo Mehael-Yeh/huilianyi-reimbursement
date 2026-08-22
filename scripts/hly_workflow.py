@@ -859,6 +859,41 @@ def _expense_save_fingerprint(view: dict[str, Any] | None) -> tuple[Any, ...] | 
     )
 
 
+def complete_manual_apportionment(
+    rows: list[dict[str, Any]],
+    report: dict[str, Any],
+    template: dict[str, Any],
+    expense_type_id: str,
+    amount: float,
+) -> list[dict[str, Any]]:
+    """Fill the client-side fields omitted by the default-apportionment API."""
+    owner_job = template.get("ownerJob") or {}
+    company_oid = report.get("docCompanyOID") or template.get("companyOID")
+    company_id = template.get("companyID")
+    company_name = report.get("docCompanyName")
+    company_code = report.get("docCompanyCode")
+    for row in rows:
+        row.update({
+            "expenseTypeId": expense_type_id,
+            "currency": "CNY",
+            "amount": amount,
+            "baseCurrencyAmount": amount,
+            "relevantPerson": report.get("applicantOID"),
+            "personName": report.get("applicantName"),
+            "personEmployeeID": owner_job.get("employeeId"),
+            "companyId": company_id,
+            "apportionmentCompanyOID": company_oid,
+            "apportionmentCompanyName": company_name,
+            "apportionmentCompanyCode": company_code,
+            "originTaxAmount": 0.0,
+            "baseTaxAmount": 0.0,
+            "defaultApportion": True,
+            "isEditable": True,
+            "proportion": 1.0,
+        })
+    return rows
+
+
 def wait_for_expense_save(
     api: Client,
     report_oid_value: str,
@@ -881,7 +916,10 @@ def wait_for_expense_save(
                 )
                 if async_error or view.get("invoiceSaveStatus") == 100:
                     raise RuntimeError("expense asynchronous save failed")
-                if view.get("invoiceStatus") in {"FINISHED", "SUBMITTED"}:
+                if (
+                    view.get("invoiceStatus") in {"FINISHED", "SUBMITTED"}
+                    and view.get("invoiceSaveStatus") in {None, 102}
+                ):
                     return view
         time.sleep(1)
     status = {
@@ -947,6 +985,9 @@ def add_manual_expense(
     # asynchronous save worker to reject an otherwise accepted request.
     payload["ownerJobId"] = report.get("applicantJobId") or payload.get("ownerJobId")
     owner_job = payload.get("ownerJob") or {}
+    apportionment = complete_manual_apportionment(
+        apportionment, report, payload, expense_type_id, amount
+    )
     data = payload.get("data") or []
     for field in data:
         key = field.get("name") or field.get("messageKey")
@@ -991,8 +1032,8 @@ def add_manual_expense(
         "currencyCode": "CNY", "invoiceCurrencyCode": "CNY",
         "createdDate": created.isoformat(timespec="seconds").replace("+00:00", "Z"),
         "currencyDate": f"{local_date.isoformat()} 00:00:00",
-        "companyOID": owner_job.get("companyOID") or payload.get("companyOID"),
-        "companyID": owner_job.get("companyId") or payload.get("companyID"),
+        "companyOID": report.get("docCompanyOID") or payload.get("companyOID"),
+        "companyID": payload.get("companyID"),
         "paymentCompanyOID": None, "paymentType": 1001,
         "withReceipt": False, "receiptList": [], "receipts": [],
         "attachments": [], "data": data, "expenseApportion": apportionment,
