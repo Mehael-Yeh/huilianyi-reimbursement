@@ -3,7 +3,7 @@ name: huilianyi-reimbursement
 description: 使用汇联易 A2 API 校准历史习惯、识别和分类票据、创建差旅申请/差旅报销/个人报销草稿、保存费用并生成核对表。仅处理草稿，永不提交、删除、关闭或撤回单据。
 license: MIT
 metadata:
-  version: 4.1.0
+  version: 4.2.0
   author: Mehael Yeh
   platforms: [linux, windows, darwin]
 ---
@@ -138,7 +138,7 @@ python scripts/hly.py audit-travel-pair --username <账号> \
 python scripts/hly.py prepare-review --username <账号> \
   --report <报销单号> --invoice-review tmp/invoice-review.json \
   --output tmp/reimbursement-review.json
-node scripts/build_review_workbook.mjs \
+python scripts/build_review_workbook.py \
   tmp/reimbursement-review.json outputs/报销分类金额核对.xlsx
 ```
 
