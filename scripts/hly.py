@@ -250,7 +250,16 @@ def command_add_invoice(args):
         raise SystemExit("Refusing external writes without --confirm-draft-write")
     api, gateway = _clients(args.username)
     report = find_report(api, args.report)
-    result = add_invoice(api, gateway, report, args.file, args.expense_type, args.amount)
+    result = add_invoice(
+        api,
+        gateway,
+        report,
+        args.file,
+        args.expense_type,
+        args.amount,
+        attachment_paths=args.attachment,
+        hotel_cities=args.hotel_city,
+    )
     verification = verify_report_invoices(api, report["expenseReportOID"])
     print(json.dumps({"created": result, "report": verification}, ensure_ascii=False, indent=2))
 
@@ -262,7 +271,13 @@ def command_add_manual_expense(args):
     report = find_report(api, args.report)
     fields = dict(value.split("=", 1) for value in args.field)
     result = add_manual_expense(
-        api, gateway, report, args.expense_type, args.amount, args.date, fields
+        api,
+        gateway,
+        report,
+        args.expense_type,
+        args.amount,
+        args.date,
+        fields,
     )
     verification = verify_report_invoices(api, report["expenseReportOID"])
     print(json.dumps({"created": result, "report": verification}, ensure_ascii=False, indent=2))
@@ -323,6 +338,12 @@ def build_parser():
     invoice.add_argument("--file", required=True)
     invoice.add_argument("--expense-type", required=True)
     invoice.add_argument("--amount", type=float, required=True)
+    invoice.add_argument(
+        "--attachment", action="append", default=[], help="supporting toll document (PDF/OFD/ZIP/XML)"
+    )
+    invoice.add_argument(
+        "--hotel-city", action="append", default=[], help="override/add an inferred hotel city"
+    )
     invoice.add_argument("--confirm-draft-write", action="store_true")
     invoice.set_defaults(func=command_add_invoice)
 
