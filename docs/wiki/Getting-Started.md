@@ -16,13 +16,19 @@ python scripts/hly.py --help
 
 ## 凭据
 
-账号通过 `--username` 传入。密码通过交互提示或当前进程的 `HLY_PASSWORD` 读取，不应写入命令历史、配置文件或仓库。
+首次运行：
+
+```bash
+python scripts/hly.py credentials-init
+```
+
+命令会同时询问账号和密码并先验证登录。账号保存在本地 Codex 配置目录，密码保存在操作系统凭据库；两者都不进入仓库、命令历史或状态 JSON。后续命令可以省略 `--username`。
 
 ## 首次校准
 
 ```bash
-python scripts/hly.py profile --username <账号> --output tmp/profile.json
-python scripts/hly.py history --username <账号> --output tmp/history.json
+python scripts/hly.py profile --output tmp/profile.json
+python scripts/hly.py history --output tmp/history.json
 ```
 
 向用户确认画像中的公司、部门、代理人、参与人、项目和事由。历史 OID 不是永久配置，正式写入前必须重新解析。

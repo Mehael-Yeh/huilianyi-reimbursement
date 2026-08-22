@@ -4,16 +4,16 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
-import os
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from hly_api import clients_from_auth, login
+from hly_credentials import CredentialStore
 from hly_workflow import (
     add_invoice,
+    add_invoice_batch,
     add_manual_expense,
     build_history_model,
     build_personal_report_draft,
@@ -32,14 +32,19 @@ from hly_workflow import (
     verify_report_invoices,
 )
 from review_export import load_json, merge_review_data
+from build_review_workbook import save_verified_workbook
 
 
-def _password() -> str:
-    return os.environ.get("HLY_PASSWORD") or getpass.getpass("Huilianyi password: ")
+def _clients(username: str | None):
+    store = CredentialStore()
+    cached_auth = {}
 
+    def validate(account: str, password: str):
+        cached_auth["value"] = login(account, password)
 
-def _clients(username: str):
-    return clients_from_auth(login(username, _password()))
+    credentials = store.resolve(username, validate=validate)
+    auth = cached_auth.get("value") or login(credentials.username, credentials.password)
+    return clients_from_auth(auth)
 
 
 def _write_json(path: str | Path, value):
@@ -58,6 +63,33 @@ def _load_travel_plan(path: str | Path) -> list[dict]:
     if not isinstance(lines, list) or not lines:
         raise ValueError("travel plan must be a non-empty JSON array or an object with a travel array")
     return lines
+
+
+def _load_invoice_batch(path: str | Path) -> list[dict]:
+    source = Path(path).resolve()
+    value = json.loads(source.read_text(encoding="utf-8"))
+    items = value.get("files") if isinstance(value, dict) else value
+    if not isinstance(items, list) or not items:
+        raise ValueError("invoice batch must be a non-empty JSON array or an object with a files array")
+    resolved = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or not item.get("path"):
+            raise ValueError(f"invoice batch item {index} requires path")
+        row = dict(item)
+        item_path = Path(str(row["path"]))
+        row["path"] = str(item_path if item_path.is_absolute() else (source.parent / item_path).resolve())
+        resolved.append(row)
+    return resolved
+
+
+def _confirmed_dates(start: str | None, end: str | None) -> tuple[str, str]:
+    start = start or input("Reimbursement start date (YYYY-MM-DD): ").strip()
+    end = end or input("Reimbursement end date (YYYY-MM-DD): ").strip()
+    start_date = datetime.fromisoformat(start).date()
+    end_date = datetime.fromisoformat(end).date()
+    if end_date < start_date:
+        raise ValueError("end date is before start date")
+    return start_date.isoformat(), end_date.isoformat()
 
 
 def _save_state(path: Path, state: dict):
@@ -114,6 +146,12 @@ def command_history(args):
     model = build_history_model(api, args.limit)
     _write_json(args.output, model)
     print(json.dumps({"output": str(Path(args.output).resolve()), "applications": len(model["applications"]), "reports": len(model["reports"])}, ensure_ascii=False, indent=2))
+
+
+def command_credentials_init(args):
+    store = CredentialStore()
+    store.prompt_and_save(lambda username, password: login(username, password))
+    print(json.dumps({"stored": True, "config": str(store.config_path)}, ensure_ascii=False, indent=2))
 
 
 def command_profile(args):
@@ -185,11 +223,12 @@ def command_create_application(args):
     agent = find_user(api, args.agent)
     participant = find_user(api, args.participant)
     plan = _load_travel_plan(args.travel_plan)
+    start, end = _confirmed_dates(args.start, args.end)
     state_path = Path(args.state)
     state = _load_state(state_path)
     if "travelApplication" not in state:
         payload = build_travel_application_draft(
-            template, agent, participant, args.start, args.end, plan
+            template, agent, participant, start, end, plan
         )
         created = save_application_draft(api, payload)
         state["travelApplication"] = {
@@ -266,6 +305,25 @@ def command_add_invoice(args):
     print(json.dumps({"created": result, "report": verification}, ensure_ascii=False, indent=2))
 
 
+def command_add_invoice_batch(args):
+    if not args.confirm_draft_write:
+        raise SystemExit("Refusing external writes without --confirm-draft-write")
+    api, gateway = _clients(args.username)
+    report = find_report(api, args.report)
+    result = add_invoice_batch(
+        api,
+        gateway,
+        report,
+        _load_invoice_batch(args.invoice_batch),
+        args.expense_type,
+        attachment_paths=args.attachment,
+        hotel_cities=args.hotel_city,
+        upload_workers=args.upload_workers,
+    )
+    verification = verify_report_invoices(api, report["expenseReportOID"])
+    print(json.dumps({"created": result, "report": verification}, ensure_ascii=False, indent=2))
+
+
 def command_add_manual_expense(args):
     if not args.confirm_draft_write:
         raise SystemExit("Refusing external writes without --confirm-draft-write")
@@ -312,36 +370,60 @@ def command_prepare_review(args):
     print(json.dumps({"output": str(Path(args.output).resolve()), "rows": len(review["rows"])}, ensure_ascii=False, indent=2))
 
 
+def command_finalize_review(args):
+    api, _ = _clients(args.username)
+    reports = []
+    categories = []
+    for code in args.report:
+        report = find_report(api, code)
+        verification = verify_report_invoices(api, report["expenseReportOID"])
+        reports.append(verification)
+        if report.get("applicationOID"):
+            categories.extend(compare_travel_amounts(
+                get_application(api, report["applicationOID"]),
+                api.request(
+                    f"/api/expense/report/invoices/v2?expenseReportOID={report['expenseReportOID']}"
+                ).get("rows") or {},
+            ).get("categories") or [])
+    review = merge_review_data(load_json(args.invoice_review), reports, categories)
+    _write_json(args.review_output, review)
+    workbook = save_verified_workbook(review, Path(args.xlsx_output))
+    print(json.dumps({"review": str(Path(args.review_output).resolve()), **workbook}, ensure_ascii=False, indent=2))
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Huilianyi draft-only API workflow")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    credentials = sub.add_parser("credentials-init", help="validate and securely store account and password")
+    credentials.set_defaults(func=command_credentials_init)
+
     history = sub.add_parser("history", help="read application/report/invoice relationships")
-    history.add_argument("--username", required=True)
+    history.add_argument("--username")
     history.add_argument("--limit", type=int, default=100)
     history.add_argument("--output", default="tmp/hly-history.json")
     history.set_defaults(func=command_history)
 
     profile = sub.add_parser("profile", help="first-run: distill reimbursement habits into a local profile for user review")
-    profile.add_argument("--username", required=True)
+    profile.add_argument("--username")
     profile.add_argument("--limit", type=int, default=100)
     profile.add_argument("--output", default="tmp/hly-profile.json")
     profile.set_defaults(func=command_profile)
 
     application = sub.add_parser("create-application", help="create one planned travel application draft")
-    application.add_argument("--username", required=True)
+    application.add_argument("--username")
     application.add_argument("--template-application", required=True)
     application.add_argument("--agent", required=True)
     application.add_argument("--participant", required=True)
-    application.add_argument("--start", required=True)
-    application.add_argument("--end", required=True)
+    application.add_argument("--start")
+    application.add_argument("--end")
     application.add_argument("--travel-plan", required=True)
     application.add_argument("--state", default="tmp/hly-state.json")
     application.add_argument("--confirm-draft-write", action="store_true")
     application.set_defaults(func=command_create_application)
 
     reports = sub.add_parser("create-reports", help="create travel and optional personal report drafts")
-    reports.add_argument("--username", required=True)
+    reports.add_argument("--username")
     reports.add_argument("--target-application", required=True)
     reports.add_argument("--personal-title", default="客户送礼，请客招待")
     reports.add_argument("--state", default="tmp/hly-state.json")
@@ -350,13 +432,13 @@ def build_parser():
     reports.set_defaults(func=command_create_reports)
 
     audit = sub.add_parser("audit-travel-pair", help="compare linked application budget and report expenses")
-    audit.add_argument("--username", required=True)
+    audit.add_argument("--username")
     audit.add_argument("--application", required=True)
     audit.add_argument("--report", required=True)
     audit.set_defaults(func=command_audit_travel_pair)
 
     invoice = sub.add_parser("add-invoice", help="upload/OCR/verify/classify/bind one invoice")
-    invoice.add_argument("--username", required=True)
+    invoice.add_argument("--username")
     invoice.add_argument("--report", required=True)
     invoice.add_argument("--file", required=True)
     invoice.add_argument("--expense-type", required=True)
@@ -370,8 +452,19 @@ def build_parser():
     invoice.add_argument("--confirm-draft-write", action="store_true")
     invoice.set_defaults(func=command_add_invoice)
 
+    batch = sub.add_parser("add-invoice-batch", help="bind one classified category as one expense line")
+    batch.add_argument("--username")
+    batch.add_argument("--report", required=True)
+    batch.add_argument("--invoice-batch", required=True, help="JSON array of {path, amount} items")
+    batch.add_argument("--expense-type", required=True)
+    batch.add_argument("--attachment", action="append", default=[])
+    batch.add_argument("--hotel-city", action="append", default=[])
+    batch.add_argument("--upload-workers", type=int, default=4)
+    batch.add_argument("--confirm-draft-write", action="store_true")
+    batch.set_defaults(func=command_add_invoice_batch)
+
     manual = sub.add_parser("add-manual-expense", help="create a no-receipt manual expense")
-    manual.add_argument("--username", required=True)
+    manual.add_argument("--username")
     manual.add_argument("--report", required=True)
     manual.add_argument("--expense-type", required=True)
     manual.add_argument("--amount", type=float, required=True)
@@ -381,16 +474,24 @@ def build_parser():
     manual.set_defaults(func=command_add_manual_expense)
 
     verify = sub.add_parser("verify-report", help="read back expense and receipt state")
-    verify.add_argument("--username", required=True)
+    verify.add_argument("--username")
     verify.add_argument("--report", required=True)
     verify.set_defaults(func=command_verify_report)
 
     review = sub.add_parser("prepare-review", help="merge invoice classification with saved expense results")
-    review.add_argument("--username", required=True)
+    review.add_argument("--username")
     review.add_argument("--report", action="append", required=True)
     review.add_argument("--invoice-review", required=True)
     review.add_argument("--output", default="tmp/reimbursement-review.json")
     review.set_defaults(func=command_prepare_review)
+
+    final_review = sub.add_parser("finalize-review", help="read back reports and always export the final Excel list")
+    final_review.add_argument("--username")
+    final_review.add_argument("--report", action="append", required=True)
+    final_review.add_argument("--invoice-review", required=True)
+    final_review.add_argument("--review-output", default="tmp/reimbursement-review.json")
+    final_review.add_argument("--xlsx-output", default="outputs/报销分类金额核对.xlsx")
+    final_review.set_defaults(func=command_finalize_review)
     return parser
 
 

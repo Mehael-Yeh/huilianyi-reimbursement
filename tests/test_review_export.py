@@ -10,6 +10,21 @@ from review_export import merge_review_data  # noqa: E402
 
 
 class ReviewExportTests(unittest.TestCase):
+    def test_multi_receipt_expense_keeps_each_invoice_amount_in_excel_rows(self):
+        review = {"rows": [
+            {"fileName": "a.pdf", "invoiceNumber": "A", "category": "过路费", "amount": 10},
+            {"fileName": "b.pdf", "invoiceNumber": "B", "category": "过路费", "amount": 20},
+        ]}
+        reports = [{
+            "businessCode": "ER-1", "totalAmount": 30, "expenses": [{
+                "expenseOID": "line-1", "expenseCode": "E-1", "expenseType": "过路费",
+                "amount": 30, "invoiceNumbers": ["A", "B"], "invoiceSaveStatus": 102,
+            }],
+        }]
+        result = merge_review_data(review, reports)
+        self.assertEqual([row["finalAmount"] for row in result["rows"]], [10, 20])
+        self.assertEqual({row["expenseCode"] for row in result["rows"]}, {"E-1"})
+
     def test_matches_classified_invoice_to_saved_expense(self):
         invoice_review = {"rows": [{
             "fileName": "invoice.pdf", "format": "PDF", "invoiceNumber": "12345678",

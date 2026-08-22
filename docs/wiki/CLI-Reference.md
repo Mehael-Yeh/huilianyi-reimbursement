@@ -1,5 +1,13 @@
 # 命令行参考
 
+首次使用先验证并安全保存账号和密码：
+
+```bash
+python scripts/hly.py credentials-init
+```
+
+之后所有命令的 `--username` 均可省略。
+
 ## 只读命令
 
 ```bash
@@ -14,6 +22,9 @@ python scripts/hly.py audit-travel-pair --username <账号> --application <申�
 ```bash
 python scripts/hly.py create-application <参数> --confirm-draft-write
 python scripts/hly.py create-reports <参数> --confirm-draft-write
+python scripts/hly.py add-invoice-batch \
+  --report <报销单号> --invoice-batch <类别JSON> \
+  --expense-type <费用类型> --confirm-draft-write
 python scripts/hly.py add-invoice <参数> --confirm-draft-write
 python scripts/hly.py add-manual-expense <参数> --confirm-draft-write
 ```
@@ -30,13 +41,12 @@ python scripts/hly.py <子命令> --help
 python scripts/invoice_extract.py <文件...> --output tmp/invoice-review.json
 python scripts/invoice_extract.py <加密ZIP> --prefer-format OFD \
   --extract-dir tmp/invoices --output tmp/invoice-review.json
-python scripts/hly.py prepare-review --username <账号> \
-  --report <报销单号> --invoice-review tmp/invoice-review.json \
-  --output tmp/reimbursement-review.json
-python scripts/build_review_workbook.py \
-  tmp/reimbursement-review.json outputs/报销分类金额核对.xlsx
+python scripts/hly.py finalize-review \
+  --report <差旅报销单号> --report <个人报销单号> \
+  --invoice-review tmp/invoice-review.json \
+  --xlsx-output outputs/报销分类金额核对.xlsx
 ```
 
 差旅和个人报销同时存在时，可重复传入 `--report`。
 
-加密 ZIP 会交互提示密码。`--prefer-format` 决定同一发票存在多个格式时提取哪个版本；`--extract-dir` 解密并输出去重后选中的文件，供 `add-invoice` 使用。
+加密 ZIP 会交互提示密码。`--prefer-format` 决定同一发票存在多个格式时提取哪个版本；`--extract-dir` 解密并输出去重后选中的文件，供 `add-invoice-batch` 使用。类别 JSON 是 `{path, amount}` 对象数组；同一类别只创建一条多票费用行。

@@ -5,3 +5,4 @@ tmp/
 .pytest_cache/
 node_modules/
 outputs/
+.venv/
