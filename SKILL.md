@@ -3,7 +3,7 @@ name: huilianyi-reimbursement
 description: 使用汇联易 A2 API 校准历史习惯、识别和分类票据、创建差旅申请/差旅报销/个人报销草稿、保存费用并生成核对表。仅处理草稿，永不提交、删除、关闭或撤回单据。
 license: MIT
 metadata:
-  version: 4.3.0
+  version: 5.0.0
   author: Mehael Yeh
   platforms: [linux, windows, darwin]
 ---
@@ -11,6 +11,12 @@ metadata:
 # 汇联易报销填报
 
 只使用汇联易 A2 API 完成历史校准、票据识别、草稿创建、费用保存、回读验收和 Excel 核对表交付。不得手动操作或自动化操作浏览器；若 API 缺少能力，停止写入并向用户说明具体缺口。
+
+## 分层与能力入口
+
+本 Skill 是 workflow layer：负责材料识别、分类、差旅判断、用户确认、报销规则、风险控制、回读核验和 Excel 交付。通用汇联易认证、HTTP、分页、异常和原子能力位于 `src/huilianyi/`；`src/huilianyi_mcp/` 是可独立运行的 capability layer。
+
+Skill 可以继续直接使用 `scripts/hly.py`，不要求 MCP 已配置。其他 Agent 需要原子汇联易能力时可连接 MCP，并自行组合工具；不得把复杂业务决策下沉为万能 Tool。已验证和观察到的接口分别见 [API inventory](docs/api-inventory.md)、[API map](docs/huilianyi-api-map.md) 与 `data/api_registry.yaml`。
 
 ## 安全边界
 
@@ -176,3 +182,5 @@ python scripts/hly.py finalize-review \
 - [API 端点](references/api-endpoints.md)
 - [鉴权](references/api-notes.md)
 - [Excel 核对表](references/review-workbook.md)
+- [API inventory](docs/api-inventory.md)
+- [Huilianyi API map](docs/huilianyi-api-map.md)

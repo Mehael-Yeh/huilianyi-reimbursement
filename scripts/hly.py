@@ -25,6 +25,7 @@ from hly_workflow import (
     find_user,
     get_application,
     get_report,
+    get_report_invoices,
     report_oid,
     save_application_draft,
     save_report_draft,
@@ -279,10 +280,9 @@ def command_audit_travel_pair(args):
     report = find_report(api, args.report)
     if report.get("applicationOID") != application.get("applicationOID"):
         raise SystemExit("Report is not linked to the specified application")
-    invoices = api.request(
-        f"/api/expense/report/invoices/v2?expenseReportOID={report['expenseReportOID']}"
+    comparison = compare_travel_amounts(
+        application, get_report_invoices(api, report["expenseReportOID"])
     )
-    comparison = compare_travel_amounts(application, invoices.get("rows") or invoices)
     print(json.dumps(comparison, ensure_ascii=False, indent=2))
 
 
@@ -360,9 +360,7 @@ def command_prepare_review(args):
         if report.get("applicationOID"):
             comparison = compare_travel_amounts(
                 get_application(api, report["applicationOID"]),
-                api.request(
-                    f"/api/expense/report/invoices/v2?expenseReportOID={report['expenseReportOID']}"
-                ).get("rows") or {},
+                get_report_invoices(api, report["expenseReportOID"]),
             )
             categories.extend(comparison.get("categories") or [])
     review = merge_review_data(load_json(args.invoice_review), reports, categories)
@@ -381,9 +379,7 @@ def command_finalize_review(args):
         if report.get("applicationOID"):
             categories.extend(compare_travel_amounts(
                 get_application(api, report["applicationOID"]),
-                api.request(
-                    f"/api/expense/report/invoices/v2?expenseReportOID={report['expenseReportOID']}"
-                ).get("rows") or {},
+                get_report_invoices(api, report["expenseReportOID"]),
             ).get("categories") or [])
     review = merge_review_data(load_json(args.invoice_review), reports, categories)
     _write_json(args.review_output, review)
