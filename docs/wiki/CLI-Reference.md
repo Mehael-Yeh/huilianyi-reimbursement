@@ -33,7 +33,7 @@ python scripts/invoice_extract.py <加密ZIP> --prefer-format OFD \
 python scripts/hly.py prepare-review --username <账号> \
   --report <报销单号> --invoice-review tmp/invoice-review.json \
   --output tmp/reimbursement-review.json
-node scripts/build_review_workbook.mjs \
+python scripts/build_review_workbook.py \
   tmp/reimbursement-review.json outputs/报销分类金额核对.xlsx
 ```
 

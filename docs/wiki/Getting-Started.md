@@ -4,9 +4,12 @@
 
 - Python 3.10+
 - 可访问汇联易 A2 服务的网络
-- 用于 Excel 核对表的 Node.js 与 `@oai/artifact-tool`（Codex 工作区已提供）
+
+克隆仓库，将整个目录添加到所用 Agent 的 Skill 搜索路径；具体导入方式以该 Agent 的文档为准。
 
 ```bash
+git clone https://github.com/Mehael-Yeh/huilianyi-reimbursement.git
+cd huilianyi-reimbursement
 python -m pip install -r requirements.txt
 python scripts/hly.py --help
 ```
