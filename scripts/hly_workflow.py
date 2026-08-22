@@ -159,6 +159,11 @@ def get_report(api: Client, oid: str) -> dict[str, Any]:
     return unwrap_row(api.request(f"/api/v3/expense/reports/{oid}"))
 
 
+def get_report_invoices(api: Client, oid: str) -> dict[str, Any]:
+    """Return the normalized expense/invoice collection for one report."""
+    return unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={oid}"))
+
+
 def find_application(api: Client, code: str) -> dict[str, Any]:
     for item in search_applications(api):
         if business_code(item) == code:
@@ -308,7 +313,7 @@ def build_history_model(api: Client, limit: int = 100) -> dict[str, Any]:
         if not oid:
             continue
         detail = get_report(api, oid)
-        invoice_data = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={oid}"))
+        invoice_data = get_report_invoices(api, oid)
         linked_oid = detail.get("applicationOID")
         comparison = None
         if linked_oid in application_details:
@@ -714,158 +719,47 @@ def add_invoice(
     report: dict[str, Any],
     file_path: str | Path,
     expense_type_name: str,
-    amount: float,
+    amount: float | None,
     attachment_paths: list[str | Path] | None = None,
     hotel_cities: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Upload, recognize, verify, classify, and bind one invoice to a draft."""
-    if report.get("status") != DRAFT_STATUS:
-        raise ValueError("invoices may only be added to an editing draft (status 1001)")
-    invoice_path = validate_upload_file(file_path)
-    attachment_files = [validate_upload_file(path) for path in (attachment_paths or [])]
-    if attachment_files and expense_type_name != "过路费":
-        raise ValueError("supporting toll documents may only be attached to 过路费")
-    report_oid_value = report["expenseReportOID"]
-    types = available_expense_types(api, report)
-    if expense_type_name not in types:
-        raise LookupError(f"expense type not available: {expense_type_name}")
-    expense_type = types[expense_type_name]
-    expense_type_id = str(expense_type.get("expenseTypeId") or expense_type.get("id"))
-    expense_type_oid = expense_type.get("expenseTypeOID") or expense_type.get("oid")
-    owner_oid = report["applicantOID"]
-    budget_match = {
-        "expenseType": canonical_expense_type(expense_type_name),
-        "applicationCustomBudgetId": [],
-        "applicationAmount": 0.0,
-        "budgetLineCount": 0,
-        "mode": "personal-expense" if not report.get("applicationOID") else "manual-expense",
-    }
-    if report.get("applicationOID"):
-        application = get_application(api, report["applicationOID"])
-        budget_match = application_budget_match(application, expense_type_name)
-
-    upload = api.upload_invoice(invoice_path)
-    ocr = gateway.request(
-        "/receipt/api/receipt/ocr/v3?roleType=TENANT&client=WEB&isInternationalOCR=false"
-        f"&districtCode=&reportOID={urllib.parse.quote(report_oid_value)}",
-        "POST",
-        [{"oriAttachment": upload, "attachmentType": "INVOICE_IMAGES", "autoCountSent": "TRUE"}],
+    """Single-invoice compatibility wrapper around the canonical batch pipeline."""
+    batch = add_invoice_batch(
+        api,
+        gateway,
+        report,
+        [{"path": file_path, "amount": amount}],
+        expense_type_name,
+        attachment_paths=attachment_paths,
+        hotel_cities=hotel_cities,
+        upload_workers=1,
     )
-    receipt = _first_receipt(ocr)
-    receipt["pdfUrl"] = upload.get("fileURL") or upload.get("downloadUrl")
-    verified = gateway.request(
-        "/receipt/api/receipt/verify/batch?roleType=TENANT", "POST", [{"invoiceInfo": receipt}]
-    )
-    receipt = _verified_receipt(verified)
-    receipt["pdfUrl"] = receipt.get("pdfUrl") or upload.get("fileURL") or upload.get("downloadUrl")
-    recognized_amount = recognized_receipt_amount(receipt)
-    available_amount = receipt_available_amount(receipt)
-    if available_amount is not None and available_amount <= 0:
+    item = batch["items"][0]
+    if item["status"] == "skipped_duplicate":
+        return {
+            "duplicate": True,
+            "invoiceNumber": item.get("invoiceNumber"),
+            "invoiceOID": item.get("receiptOID"),
+            "receiptOID": item.get("receiptOID"),
+            "expenseType": expense_type_name,
+            "amount": item.get("amount"),
+            "message": f"发票号 {item.get('invoiceNumber')} 已存在于该报销单,跳过(不重复落账)",
+        }
+    if item["status"] == "skipped_closed":
         raise ValueError(
             "invoice has no reimbursable balance; it may already be locked or reimbursed in another report"
         )
-    if amount is None:
-        if recognized_amount is None:
-            raise ValueError("invoice amount is unavailable after OCR/verification; confirm it manually")
-        amount = recognized_amount
-    amount = round(float(amount), 2)
-    if recognized_amount is not None and abs(amount - recognized_amount) > 0.01:
-        raise ValueError(
-            f"provided amount {amount:.2f} differs from verified invoice amount {recognized_amount:.2f}"
-        )
-    if available_amount is not None and amount - available_amount > 0.01:
-        raise ValueError(
-            f"invoice amount {amount:.2f} exceeds remaining reimbursable balance {available_amount:.2f}"
-        )
-
-    # Incremental dedup: if this invoice number already exists in the report, skip it.
-    invoice_no = str(receipt.get("invoiceNumber") or receipt.get("invoiceCode") or "").strip()
-    if invoice_no and invoice_no in existing_invoice_numbers(api, report_oid_value):
-        return {
-            "duplicate": True,
-            "invoiceNumber": invoice_no,
-            "invoiceOID": receipt.get("receiptOID"),
-            "receiptOID": receipt.get("receiptOID"),
-            "expenseType": expense_type_name,
-            "amount": float(amount),
-            "message": f"发票号 {invoice_no} 已存在于该报销单,跳过(不重复落账)",
-        }
-
-    defaults_value = gateway.request(
-        "/invoice/api/invoice/defaults?roleType=TENANT&isDateCombinedUTC=false",
-        "POST",
-        {"expenseTypeId": expense_type_id, "receipts": [receipt]},
-    )
-    defaults = unwrap_row(defaults_value)
-    data = copy.deepcopy(defaults.get("data") or []) if isinstance(defaults, dict) else []
-    resolved_hotel_cities: list[str] = []
-    if expense_type_name == "酒店":
-        resolved_hotel_cities = list(dict.fromkeys(hotel_cities or infer_hotel_cities(
-            invoice_path.name, receipt
-        )))
-        if not resolved_hotel_cities:
-            raise ValueError("cannot infer hotel city; pass --hotel-city explicitly")
-        start, end = report_travel_date_range(api, report)
-        data = hotel_field_values(data, resolved_hotel_cities, start, end)
-    attachments = [api.upload_attachment(path) for path in attachment_files]
-    apportionment = unwrap_rows(api.request(
-        "/api/expense/default/apportionment",
-        "POST",
-        {
-            "expenseReportOID": report_oid_value,
-            "expenseTypeId": expense_type_id,
-            "amount": amount,
-            "currency": "CNY",
-            "ownerOID": owner_oid,
-            "merge": True,
-            "applicationCustomBudgetId": budget_match["applicationCustomBudgetId"],
-            "prepaymentLineIdList": [],
-            "paymentCompanyOID": report.get("companyOID"),
-        },
-    ))
-    common = {
-        "expenseReportOID": report_oid_value,
-        "ownerOID": owner_oid,
-        "expenseTypeId": expense_type_id,
-        "expenseTypeOID": expense_type_oid,
-        "expenseTypeName": expense_type_name,
-        "expenseTypeIconName": expense_type.get("iconName") or expense_type.get("expenseTypeIconName"),
-        "currencyCode": "CNY",
-        "invoiceCurrencyCode": "CNY",
-        "amount": float(amount),
-        "originalAmount": float(amount),
-        "currencyPrecision": 2,
-        "receiptList": [receipt],
-        "receipts": [receipt],
-        "withReceipt": True,
-        "valid": True,
-        "attachments": attachments,
-        "data": data,
-        "expenseApportion": apportionment,
-    }
-    tax_body = dict(defaults) if isinstance(defaults, dict) else {}
-    tax_body.update(common)
-    tax_result = unwrap_row(
-        gateway.request("/invoice/api/invoice/tax/amount/by/receipts?roleType=TENANT", "POST", tax_body)
-    )
-    v5_body = build_v5_body(tax_result, common)
-    query = (
-        f"/invoice/api/v5/invoices?hlyRequestID=agent-{int(time.time() * 1000)}&roleType=TENANT"
-        "&isDateCombinedUTC=false&utcTime=true&recalculatePolicy=false&shieldTax=false&distrit=true"
-        "&recalculateDeductible=true&needValidateExpBaseAmountOverReceipt=true"
-    )
-    created = unwrap_row(gateway.request(query, "POST", v5_body))
     return {
-        "invoiceOID": created.get("invoiceOID"),
-        "receiptOID": receipt.get("receiptOID"),
-        "receiptId": receipt.get("id"),
+        "invoiceOID": batch.get("invoiceOID"),
+        "receiptOID": item.get("receiptOID"),
+        "receiptId": item.get("receiptId"),
         "expenseType": expense_type_name,
-        "amount": float(amount),
-        "recognizedAmount": recognized_amount,
-        "availableAmount": available_amount,
-        "budgetMatch": budget_match,
-        "attachments": [item.get("fileName") for item in attachments],
-        "hotelCities": resolved_hotel_cities,
+        "amount": item.get("amount"),
+        "recognizedAmount": item.get("recognizedAmount"),
+        "availableAmount": item.get("availableAmount"),
+        "budgetMatch": batch.get("budgetMatch"),
+        "attachments": batch.get("attachments", []),
+        "hotelCities": batch.get("hotelCities", []),
     }
 
 
@@ -986,6 +880,7 @@ def add_invoice_batch(
             "path": str(path),
             "invoiceNumber": invoice_number,
             "receiptOID": receipt.get("receiptOID"),
+            "receiptId": receipt.get("id"),
             "amount": amount,
             "recognizedAmount": recognized,
             "availableAmount": available,
@@ -1076,7 +971,7 @@ def _manual_expense_template(api: Client, expense_type_name: str) -> dict[str, A
         oid = report_oid(item)
         if not oid:
             continue
-        invoice_data = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={oid}"))
+        invoice_data = get_report_invoices(api, oid)
         for view in (invoice_data.get("invoiceViewDTOMap") or {}).values():
             if (
                 view.get("expenseTypeName") == expense_type_name
@@ -1111,7 +1006,7 @@ def validate_manual_expense_values(
 
 
 def _expense_views(api: Client, report_oid_value: str) -> list[dict[str, Any]]:
-    value = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={report_oid_value}"))
+    value = get_report_invoices(api, report_oid_value)
     return list((value.get("invoiceViewDTOMap") or {}).values())
 
 
@@ -1370,7 +1265,7 @@ def add_manual_expense(
 
 def existing_invoice_numbers(api: Client, report_oid_value: str) -> set[str]:
     """Return the set of invoice numbers already bound to a report (for dedup on incremental add)."""
-    invoice_data = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={report_oid_value}"))
+    invoice_data = get_report_invoices(api, report_oid_value)
     numbers: set[str] = set()
     # invoiceViewDTOMap keyed views may carry invoice number in nested receipt info.
     for view in (invoice_data.get("invoiceViewDTOMap") or {}).values():
@@ -1394,7 +1289,7 @@ def existing_invoice_numbers(api: Client, report_oid_value: str) -> set[str]:
 
 def verify_report_invoices(api: Client, report_oid_value: str) -> dict[str, Any]:
     detail = get_report(api, report_oid_value)
-    invoice_data = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={report_oid_value}"))
+    invoice_data = get_report_invoices(api, report_oid_value)
     views = list((invoice_data.get("invoiceViewDTOMap") or {}).values())
     asynchronous_failures = []
     for view in views:

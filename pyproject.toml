@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "huilianyi-reimbursement"
+version = "5.0.0"
+description = "Huilianyi Python client, MCP capability server, and reimbursement workflow skill"
+requires-python = ">=3.10"
+dependencies = [
+  "cryptography>=36",
+  "keyring>=25",
+  "mcp>=2,<3",
+  "openpyxl>=3.1",
+  "pypdf>=4",
+  "pyzipper>=0.3.6",
+  "PyYAML>=6",
+]
+
+[project.scripts]
+huilianyi-mcp = "huilianyi_mcp.server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+huilianyi = ["py.typed"]
