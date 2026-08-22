@@ -805,7 +805,7 @@ def _manual_expense_template(api: Client, expense_type_name: str) -> dict[str, A
             if (
                 view.get("expenseTypeName") == expense_type_name
                 and not view.get("withReceipt")
-                and view.get("invoiceStatus") == "FINISHED"
+                and view.get("invoiceStatus") in {"FINISHED", "SUBMITTED"}
                 and view.get("invoiceSaveStatus") != 100
             ):
                 invoice_oid_value = view.get("invoiceOID") or view.get("entityOID")
@@ -828,11 +828,6 @@ def validate_manual_expense_values(
     expected = int(raw_days) * 100
     if round(float(amount), 2) != float(expected):
         raise ValueError(f"出差补贴 amount must equal 补贴天数 × 100: expected {expected:.2f}")
-    if not str(field_values.get("客户名称", "")).strip():
-        raise ValueError(
-            "出差补贴 客户名称 cannot be blank in API mode: the tenant accepts preflight "
-            "but later marks the expense INVOICE_ASYNC_ERROR; leave this expense for web entry"
-        )
 
 
 def _expense_views(api: Client, report_oid_value: str) -> list[dict[str, Any]]:
@@ -886,7 +881,7 @@ def wait_for_expense_save(
                 )
                 if async_error or view.get("invoiceSaveStatus") == 100:
                     raise RuntimeError("expense asynchronous save failed")
-                if view.get("invoiceStatus") == "FINISHED":
+                if view.get("invoiceStatus") in {"FINISHED", "SUBMITTED"}:
                     return view
         time.sleep(1)
     status = {
@@ -947,10 +942,10 @@ def add_manual_expense(
     payload = _manual_expense_template(api, expense_type_name)
     if not payload:
         raise LookupError(f"no historical no-receipt template found: {expense_type_name}")
-    if not payload.get("ownerJobId") or not payload.get("ownerJob"):
-        owner_template = _manual_expense_template(api, expense_type_name)
-        payload["ownerJobId"] = owner_template.get("ownerJobId")
-        payload["ownerJob"] = owner_template.get("ownerJob")
+    # Historical FINISHED DTOs may have lost their job context.  The web flow
+    # uses the current report applicant's job, and omitting it causes the later
+    # asynchronous save worker to reject an otherwise accepted request.
+    payload["ownerJobId"] = report.get("applicantJobId") or payload.get("ownerJobId")
     owner_job = payload.get("ownerJob") or {}
     data = payload.get("data") or []
     for field in data:
@@ -958,7 +953,12 @@ def add_manual_expense(
         if field.get("fieldType") == "ATTACHMENTS":
             field["value"] = field["showValue"] = ""
         elif key in field_values:
-            field["value"] = field["showValue"] = str(field_values[key])
+            raw_value = field_values[key]
+            if raw_value is None or str(raw_value).strip() == "":
+                field["value"] = None
+                field["showValue"] = ""
+            else:
+                field["value"] = field["showValue"] = str(raw_value)
         else:
             field["value"] = field["showValue"] = ""
         if field.get("mappedColumnId") == 111:
@@ -993,10 +993,10 @@ def add_manual_expense(
         "currencyDate": f"{local_date.isoformat()} 00:00:00",
         "companyOID": owner_job.get("companyOID") or payload.get("companyOID"),
         "companyID": owner_job.get("companyId") or payload.get("companyID"),
-        "paymentCompanyOID": report.get("companyOID"), "paymentType": 1001,
+        "paymentCompanyOID": None, "paymentType": 1001,
         "withReceipt": False, "receiptList": [], "receipts": [],
         "attachments": [], "data": data, "expenseApportion": apportionment,
-        "comment": "", "valid": True, "createInvoice": True,
+        "comment": "", "valid": False, "createInvoice": True,
         "applicationList": [], "relatedApplicationItineraryBudgetVOList": None,
     })
     for key in (
