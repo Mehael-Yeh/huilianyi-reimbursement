@@ -68,13 +68,15 @@ body["valid"] = True
 2026-08-22 复核证明早先“创建 1.00 元出差补贴成功”的结论错误：费用虽进入列表并增加总额，但 `invoiceSaveStatus=100`，带 `INVOICE_ASYNC_ERROR/费用保存失败`，不能算成功。
 
 1. 动态查询费用类型，确认 `invoiceRequired=false`、`pasteInvoiceNeeded=false`、允许手工创建。
-2. 从 `FINISHED` 的历史同类无票费用读取 `/api/invoices/{oid}` 完整详情；列表摘要缺少岗位等保存上下文，不能作为模板。
+2. 从无异步错误的历史同类无票费用读取 `/api/invoices/{oid}` 完整详情；列表摘要缺少保存上下文，不能作为模板。历史 `FINISHED` DTO 可能没有任职岗位，必须用当前报销单的 `applicantJobId`。
 3. 出差补贴强制 `金额 = 补贴天数 × 100`。
 4. 调用默认分摊；有同类申请预算时传数值预算行 ID 列表，否则传空列表。
 5. 请求设置 `withReceipt=false`、`receiptList=[]`、`receipts=[]`。
 6. 先调用 `POST /invoice/api/validate/invoice/async`；预校验报错时停止，不创建。
 7. 仅在预校验无错时调用 `POST /invoice/api/v6/invoices`。
-8. 轮询 invoices/v2；必须到 `FINISHED` 且无异步失败标签。客户名称留空的真实测试仍失败，当前不能宣称 API 全链路可用。
+8. 轮询 invoices/v2；编辑中报销单的费用可以正常停在 `SUBMITTED`，也可能为 `FINISHED`，两者都必须确认没有异步失败标签。
+
+用户在网页成功保存的 `EXP1321459248` 实证：16 天、1600 元、客户名称为空，状态 `SUBMITTED`，无异步失败。空客户不是失败原因。API 失败请求与网页成功 DTO 的关键差异是缺少当前 `ownerJobId`，并错误使用 `valid=true`、非空 `paymentCompanyOID`；生成器必须使用网页草稿语义。
 
 ## OFD
 

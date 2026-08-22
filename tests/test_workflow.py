@@ -246,7 +246,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_travel_subsidy_is_exactly_100_per_day(self):
         validate_manual_expense_values(
-            "出差补贴", 2900, {"补贴天数": "29", "客户名称": "客户"}
+            "出差补贴", 2900, {"补贴天数": "29", "客户名称": ""}
         )
         with self.assertRaisesRegex(ValueError, "expected 2900.00"):
             validate_manual_expense_values(
@@ -254,8 +254,14 @@ class WorkflowTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "positive integer"):
             validate_manual_expense_values("出差补贴", 100, {"补贴天数": "1.5"})
-        with self.assertRaisesRegex(ValueError, "cannot be blank in API mode"):
-            validate_manual_expense_values("出差补贴", 100, {"补贴天数": "1", "客户名称": ""})
+
+    def test_manual_expense_matches_web_job_and_draft_semantics(self):
+        source = (ROOT / "scripts" / "hly_workflow.py").read_text(encoding="utf-8")
+        manual = source.split("def add_manual_expense(", 1)[1].split("def verify_report_invoices", 1)[0]
+        self.assertIn('report.get("applicantJobId")', manual)
+        self.assertIn('"paymentCompanyOID": None', manual)
+        self.assertIn('"valid": False', manual)
+        self.assertIn('field["value"] = None', manual)
 
     def test_hotel_fields_use_inferred_cities_and_full_report_range(self):
         cities = infer_hotel_cities(
