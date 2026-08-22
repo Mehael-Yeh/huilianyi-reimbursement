@@ -11,7 +11,6 @@ const data = JSON.parse(await fs.readFile(inputPath, "utf8"));
 const rows = data.rows || [];
 const categories = data.categories || [];
 const metadata = data.metadata || {};
-const excelTextFormula = (value) => `="${String(value).replaceAll('"', '""')}"`;
 const workbook = Workbook.create();
 const summary = workbook.worksheets.add("汇总");
 const details = workbook.worksheets.add("票据明细");
@@ -76,16 +75,13 @@ details.getRange(`D3:D${detailEnd}`).format.numberFormat = "@";
 details.getRange(`N3:P${detailEnd}`).format.numberFormat = "@";
 if (rows.length) {
   details.getRange(`A3:Q${rows.length + 2}`).values = rows.map((item) => [
-    item.fileName || "", item.format || "", item.documentType || "", "",
+    item.fileName || "", item.format || "", item.documentType || "", item.invoiceNumber ? `\u200B${String(item.invoiceNumber)}` : "",
     item.suggestedCategory || "", item.confirmedCategory || "", item.reportGroup || "",
     item.recognizedAmount ?? null, item.finalAmount ?? null, item.amountSource || "",
     item.classificationBasis || "", item.confidence || "", item.needsReview || "",
     item.expenseCode || "", item.saveStatus || "", item.reportCode || "", item.notes || "",
   ]);
   details.getRange(`H3:I${rows.length + 2}`).format.numberFormat = currencyFormat;
-  rows.forEach((item, index) => {
-    if (item.invoiceNumber) details.getRange(`D${index + 3}`).formulas = [[excelTextFormula(item.invoiceNumber)]];
-  });
   details.getRange(`M3:M${rows.length + 2}`).conditionalFormats.add("containsText", { text: "是", format: { fill: "#FFF2CC", font: { color: "#9C6500", bold: true } } });
   details.getRange(`O3:O${rows.length + 2}`).conditionalFormats.add("containsText", { text: "失败", format: { fill: "#FCE4D6", font: { color: "#C00000", bold: true } } });
   details.getRange(`F3:F${rows.length + 2}`).dataValidation = { rule: { type: "list", values: categoryNames.length ? categoryNames : ["待确认"] } };

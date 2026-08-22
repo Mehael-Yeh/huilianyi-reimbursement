@@ -30,4 +30,6 @@ python scripts/hly.py history --username <账号> --output tmp/history.json
 python scripts/invoice_extract.py <文件...> --output tmp/invoice-review.json
 ```
 
+若 ZIP 加密，脚本会交互提示密码。Agent 应先向用户索取密码，不猜测、不记录，也不把密码写入仓库。
+
 逐项确认低置信度、重复、金额冲突和“待确认”记录后，再创建申请或报销草稿。

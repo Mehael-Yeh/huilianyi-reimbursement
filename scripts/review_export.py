@@ -59,7 +59,7 @@ def merge_review_data(
             used_expenses.add(str(match.get("expenseOID")))
         rows.append({
             "fileName": item.get("fileName"),
-            "format": item.get("format"),
+            "format": "/".join(item.get("formats") or [item.get("format") or ""]),
             "documentType": "附件" if not item.get("countAmount", True) else "发票",
             "invoiceNumber": item.get("invoiceNumber"),
             "suggestedCategory": item.get("category"),

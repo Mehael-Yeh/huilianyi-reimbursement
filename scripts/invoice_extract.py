@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import io
 import json
+import os
 import re
+import sys
 import unicodedata
 import zipfile
 from pathlib import Path
@@ -17,8 +20,16 @@ from xml.etree import ElementTree
 SUPPORTED_SUFFIXES = {".pdf", ".ofd", ".zip", ".xml"}
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 
+
+class ArchivePasswordRequired(ValueError):
+    """Raised when an encrypted ZIP entry cannot be read without a password."""
+
+
+class ArchivePasswordError(ValueError):
+    """Raised when the supplied ZIP password is not accepted."""
+
 STRONG_KEYWORDS = {
-    "过路费": ("收费公路通行费", "道路通行服务", "高速公路通行费", "ETC通行费", "过路费", "过桥费", "过闸费"),
+    "过路费": ("收费公路通行费", "道路通行服务", "高速公路通行费", "ETC通行费", "通行费", "过路费", "过桥费", "过闸费"),
     "酒店": ("住宿服务", "住宿费", "客房费", "房费", "宾馆住宿", "酒店服务"),
     "停车费": ("停车服务", "车辆停放服务", "停车费", "停车场服务"),
     "打车费": ("出租车客运服务", "出租汽车", "网约车", "打车服务", "代驾服务", "滴滴出行", "高德打车"),
@@ -29,7 +40,7 @@ STRONG_KEYWORDS = {
 }
 
 WEAK_KEYWORDS = {
-    "过路费": ("通行费", "收费公路", "高速通行"),
+    "过路费": ("收费公路", "高速通行"),
     "酒店": ("酒店", "宾馆", "旅馆", "住宿"),
     "停车费": ("停车", "车辆停放"),
     "打车费": ("出租车", "网约", "打车", "代驾", "出行服务"),
@@ -68,11 +79,11 @@ def _xml_text(raw: bytes) -> str:
     root = ElementTree.fromstring(raw)
     values = []
     for element in root.iter():
-        if element.text and element.text.strip():
-            values.append(element.text.strip())
         local_name = element.tag.rsplit("}", 1)[-1]
         if local_name:
             values.append(local_name)
+        if element.text and element.text.strip():
+            values.append(element.text.strip())
     return "\n".join(values)
 
 
@@ -84,18 +95,54 @@ def _pdf_text(source: Any) -> str:
     return "\n".join((page.extract_text() or "") for page in PdfReader(source).pages)
 
 
-def _archive_text(raw: bytes, suffix: str) -> str:
+def _password_bytes(password: str | bytes | None) -> bytes | None:
+    if password is None or isinstance(password, bytes):
+        return password
+    return password.encode("utf-8")
+
+
+def _open_archive(raw: bytes):
+    try:
+        import pyzipper
+    except ImportError:
+        return zipfile.ZipFile(io.BytesIO(raw))
+    return pyzipper.AESZipFile(io.BytesIO(raw))
+
+
+def _read_archive_entry(archive, item, password: str | bytes | None) -> bytes:
+    if item.flag_bits & 1 and password is None:
+        raise ArchivePasswordRequired("encrypted ZIP requires a password")
+    try:
+        return archive.read(item, pwd=_password_bytes(password))
+    except (RuntimeError, NotImplementedError) as exc:
+        message = str(exc).lower()
+        if "password" in message or item.flag_bits & 1:
+            raise ArchivePasswordError("ZIP password is incorrect or encryption is unsupported") from exc
+        raise
+
+
+def _member_name(item) -> str:
+    name = str(item.filename)
+    if not item.flag_bits & 0x800:
+        try:
+            return name.encode("cp437").decode("gbk")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return name
+
+
+def _archive_text(raw: bytes, suffix: str, password: str | bytes | None = None) -> str:
     values = []
-    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+    with _open_archive(raw) as archive:
         total = sum(item.file_size for item in archive.infolist())
         if total > MAX_ARCHIVE_BYTES:
             raise ValueError("archive expands beyond the safety limit")
         for item in archive.infolist():
             if item.is_dir():
                 continue
-            child_suffix = Path(item.filename).suffix.lower()
+            child_suffix = Path(_member_name(item)).suffix.lower()
             if child_suffix in {".pdf", ".xml", ".ofd", ".zip"}:
-                child = archive.read(item)
+                child = _read_archive_entry(archive, item, password)
                 if child_suffix == ".pdf":
                     values.append(_pdf_text(io.BytesIO(child)))
                 elif child_suffix == ".xml":
@@ -104,11 +151,11 @@ def _archive_text(raw: bytes, suffix: str) -> str:
                     except ElementTree.ParseError:
                         values.append(child.decode("utf-8", errors="ignore"))
                 else:
-                    values.append(_archive_text(child, child_suffix))
+                    values.append(_archive_text(child, child_suffix, password))
     return "\n".join(values)
 
 
-def extract_text(path: str | Path) -> str:
+def extract_text(path: str | Path, password: str | bytes | None = None) -> str:
     source = Path(path)
     suffix = source.suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
@@ -118,7 +165,7 @@ def extract_text(path: str | Path) -> str:
     raw = source.read_bytes()
     if suffix == ".xml":
         return _xml_text(raw)
-    return _archive_text(raw, suffix)
+    return _archive_text(raw, suffix, password)
 
 
 def _money(value: str) -> float | None:
@@ -181,7 +228,6 @@ def extract_invoice_number(text: str) -> str | None:
     for pattern in (
         r"(?:发票号码|发票号|票据号码)[:：]?([0-9]{8,20})",
         r"(?:InvoiceNumber|InvoiceNo)[:：]?([0-9]{8,20})",
-        r"(?<![0-9])([0-9]{20})(?![0-9])",
     ):
         match = re.search(pattern, normalized)
         if match:
@@ -229,63 +275,193 @@ def classify_invoice(text: str, filename: str = "", amount: float | None = None)
     }
 
 
-def inspect_invoice(path: str | Path) -> dict[str, Any]:
+def inspect_invoice(path: str | Path, password: str | bytes | None = None) -> dict[str, Any]:
     source = Path(path)
-    text = extract_text(source)
+    text = extract_text(source, password)
     amount = extract_amount(text, source.name)
     classification = classify_invoice(text, source.name, amount["amount"])
-    return {
+    return _combined_row({
         "file": str(source.resolve()),
         "fileName": source.name,
         "format": source.suffix.lower().lstrip(".").upper(),
         "invoiceNumber": extract_invoice_number(text),
+    }, amount, classification)
+
+
+def _combined_row(
+    base: dict[str, Any], amount: dict[str, Any], classification: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        **base,
         **amount,
         **classification,
+        "amountConfidence": amount["confidence"],
+        "classificationConfidence": classification["confidence"],
+        "amountNeedsReview": amount["needsReview"],
+        "classificationNeedsReview": classification["needsReview"],
+        "confidence": (
+            "high" if amount["confidence"] == classification["confidence"] == "high" else "low"
+        ),
+        "needsReview": amount["needsReview"] or classification["needsReview"],
     }
 
 
-def inspect_invoices(path: str | Path) -> list[dict[str, Any]]:
+def _deduplicate_archive_rows(
+    rows: list[dict[str, Any]], preferred_format: str | None = None
+) -> list[dict[str, Any]]:
+    stem_formats: dict[str, set[str]] = {}
+    for row in rows:
+        member_name = str(row.get("fileName") or "").split("!", 1)[-1]
+        stem = Path(member_name).stem.casefold()
+        if stem:
+            stem_formats.setdefault(stem, set()).add(str(row.get("format") or ""))
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    unique = []
+    for row in rows:
+        invoice_number = str(row.get("invoiceNumber") or "").strip()
+        member_name = str(row.get("fileName") or "").split("!", 1)[-1]
+        stem = Path(member_name).stem.casefold()
+        if stem and len(stem_formats.get(stem, set())) > 1:
+            grouped.setdefault(f"stem:{stem}", []).append(row)
+        elif invoice_number:
+            grouped.setdefault(f"invoice:{invoice_number}", []).append(row)
+        else:
+            unique.append(row)
+    format_rank = {"XML": 3, "OFD": 2, "PDF": 1, "ZIP": 0}
+    if preferred_format:
+        format_rank[preferred_format.upper()] = 10
+    for group in grouped.values():
+        group.sort(key=lambda row: (
+            bool(preferred_format) and str(row.get("format")) == preferred_format.upper(),
+            row.get("amount") is not None,
+            row.get("confidence") == "high",
+            format_rank.get(str(row.get("format")), 0),
+        ), reverse=True)
+        selected = dict(group[0])
+        amount_evidence = max(group, key=lambda row: (
+            max((candidate.get("score", 0) for candidate in row.get("candidates") or []), default=0),
+            format_rank.get(str(row.get("format")), 0),
+        ))
+        number_evidence = max(group, key=lambda row: (
+            bool(row.get("invoiceNumber")),
+            str(row.get("format")) == "XML",
+            str(row.get("format")) == "OFD",
+        ))
+        for key in ("amount", "source", "candidates", "amountConfidence", "amountNeedsReview"):
+            selected[key] = amount_evidence.get(key)
+        selected["invoiceNumber"] = number_evidence.get("invoiceNumber")
+        selected["confidence"] = (
+            "high" if selected.get("amountConfidence") == selected.get("classificationConfidence") == "high"
+            else "low"
+        )
+        selected["needsReview"] = bool(
+            selected.get("amountNeedsReview") or selected.get("classificationNeedsReview")
+        )
+        selected["formats"] = sorted({str(row["format"]) for row in group})
+        selected["sourceFiles"] = [str(row["fileName"]) for row in group]
+        unique.append(selected)
+    return unique
+
+
+def inspect_invoices(
+    path: str | Path, password: str | bytes | None = None, *, deduplicate: bool = True,
+    preferred_format: str | None = None,
+) -> list[dict[str, Any]]:
     source = Path(path)
     if source.suffix.lower() != ".zip":
-        return [inspect_invoice(source)]
+        return [inspect_invoice(source, password)]
     rows = []
     raw = source.read_bytes()
-    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+    with _open_archive(raw) as archive:
         total = sum(item.file_size for item in archive.infolist())
         if total > MAX_ARCHIVE_BYTES:
             raise ValueError("archive expands beyond the safety limit")
         for item in archive.infolist():
             if item.is_dir():
                 continue
-            suffix = Path(item.filename).suffix.lower()
+            member_name = _member_name(item)
+            suffix = Path(member_name).suffix.lower()
             if suffix not in SUPPORTED_SUFFIXES:
                 continue
-            child = archive.read(item)
+            child = _read_archive_entry(archive, item, password)
             if suffix == ".pdf":
                 text = _pdf_text(io.BytesIO(child))
             elif suffix == ".xml":
                 text = _xml_text(child)
             else:
-                text = _archive_text(child, suffix)
-            display_name = f"{source.name}!{item.filename}"
+                text = _archive_text(child, suffix, password)
+            display_name = f"{source.name}!{member_name}"
             amount = extract_amount(text, display_name)
             classification = classify_invoice(text, display_name, amount["amount"])
-            rows.append({
+            rows.append(_combined_row({
                 "file": str(source.resolve()), "fileName": display_name,
                 "format": suffix.lstrip(".").upper(), "invoiceNumber": extract_invoice_number(text),
-                **amount, **classification,
-            })
+            }, amount, classification))
     if not rows:
         raise ValueError("ZIP contains no supported PDF/OFD/XML documents")
-    return rows
+    return _deduplicate_archive_rows(rows, preferred_format) if deduplicate else rows
+
+
+def extract_selected_archive_files(
+    path: str | Path,
+    rows: list[dict[str, Any]],
+    output_dir: str | Path,
+    password: str | bytes | None = None,
+) -> list[Path]:
+    """Decrypt and extract only the selected, deduplicated invoice members."""
+    source = Path(path)
+    if source.suffix.lower() != ".zip":
+        return [source.resolve()]
+    selected = {
+        str(row.get("fileName") or "").split("!", 1)[1]: row
+        for row in rows if "!" in str(row.get("fileName") or "")
+    }
+    target_dir = Path(output_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    extracted = []
+    with _open_archive(source.read_bytes()) as archive:
+        for item in archive.infolist():
+            member_name = _member_name(item)
+            row = selected.get(member_name)
+            if row is None:
+                continue
+            target = target_dir / f"{source.stem}_{Path(member_name).name}"
+            target.write_bytes(_read_archive_entry(archive, item, password))
+            row["extractedFile"] = str(target.resolve())
+            extracted.append(target.resolve())
+    if len(extracted) != len(selected):
+        raise ValueError("not all selected invoice members could be extracted")
+    return extracted
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect supported invoice documents")
     parser.add_argument("files", nargs="+")
     parser.add_argument("--output")
+    parser.add_argument("--extract-dir", help="decrypt and extract selected ZIP members here")
+    parser.add_argument("--prefer-format", choices=("PDF", "OFD", "XML"))
+    parser.add_argument(
+        "--zip-password-env", default="INVOICE_ZIP_PASSWORD",
+        help="environment variable containing an encrypted ZIP password",
+    )
     args = parser.parse_args()
-    rows = [row for path in args.files for row in inspect_invoices(path)]
+    password = os.environ.get(args.zip_password_env)
+    rows = []
+    for path in args.files:
+        while True:
+            try:
+                selected_rows = inspect_invoices(path, password, preferred_format=args.prefer_format)
+                if args.extract_dir:
+                    extract_selected_archive_files(path, selected_rows, args.extract_dir, password)
+                rows.extend(selected_rows)
+                break
+            except (ArchivePasswordRequired, ArchivePasswordError) as exc:
+                if not sys.stdin.isatty():
+                    parser.error(
+                        f"{path}: {exc}; ask the user for the password, then run interactively "
+                        f"or set {args.zip_password_env} for this process"
+                    )
+                password = getpass.getpass(f"ZIP password for {path}: ")
     value = {"rows": rows}
     output = json.dumps(value, ensure_ascii=False, indent=2)
     if args.output:

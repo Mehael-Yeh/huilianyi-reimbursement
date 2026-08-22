@@ -18,6 +18,7 @@ from hly_workflow import (  # noqa: E402
     hotel_field_values,
     infer_hotel_cities,
     report_date_values,
+    receipt_available_amount,
     recognized_receipt_amount,
     validate_manual_expense_values,
     complete_manual_apportionment,
@@ -255,15 +256,22 @@ class WorkflowTests(unittest.TestCase):
             105.0,
         )
         self.assertIsNone(recognized_receipt_amount({"taxAmount": 5, "unitPrice": 100}))
-
-    def test_travel_subsidy_is_exactly_100_per_day(self):
-        validate_manual_expense_values(
-            "出差补贴", 2900, {"补贴天数": "29", "客户名称": ""}
+        self.assertEqual(
+            recognized_receipt_amount({"totalAmount": 2527, "unUsedAmount": 2527, "dtoVersion": "2.0"}),
+            25.27,
         )
-        with self.assertRaisesRegex(ValueError, "expected 2900.00"):
-            validate_manual_expense_values(
-                "出差补贴", 29, {"补贴天数": "29", "客户名称": "客户"}
-            )
+        self.assertEqual(receipt_available_amount({"unUsedAmount": 2527}), 25.27)
+        self.assertEqual(receipt_available_amount({"unUsedAmount": 0}), 0.0)
+
+    def test_travel_subsidy_uses_100_per_day_as_non_blocking_default(self):
+        self.assertEqual(validate_manual_expense_values(
+            "出差补贴", 2900, {"补贴天数": "29", "客户名称": ""}
+        ), [])
+        warnings = validate_manual_expense_values(
+            "出差补贴", 29, {"补贴天数": "29", "客户名称": "客户"}
+        )
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("通用默认公式", warnings[0])
         with self.assertRaisesRegex(ValueError, "positive integer"):
             validate_manual_expense_values("出差补贴", 100, {"补贴天数": "1.5"})
 
