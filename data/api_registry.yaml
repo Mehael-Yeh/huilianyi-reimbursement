@@ -1,0 +1,537 @@
+version: 1
+last_updated: 2026-08-23
+statuses: [verified, observed, partially_verified, undocumented, deprecated, unknown]
+apis:
+  - name: oauth_login
+    method: POST
+    path: /proxy/oauth/token/v2
+    domain: auth
+    description: Authenticate an A2 web user and discover the tenant API base URL.
+    request: {content_type: application/x-www-form-urlencoded, fields: [username, encrypted_password, grant_type, client_id]}
+    response: {fields: [access_token, realm_base_service_url]}
+    auth_required: false
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_api.py, references/api-notes.md, live-login]
+    status: verified
+    mcp_exposed: false
+  - name: get_current_account
+    method: GET
+    path: /api/account?roleType=TENANT
+    domain: users_organization
+    description: Return current account and tenant-visible company fields.
+    request: {query: [roleType]}
+    response: {shape: object, fields: [userOID, fullName, companyOID, companyName]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [references/api-endpoints.md, live-read-2026-08-23]
+    status: verified
+    mcp_exposed: true
+  - name: search_users
+    method: GET
+    path: /api/users/v3/search
+    domain: users_organization
+    description: Search tenant-visible users by keyword.
+    request: {query: [roleType, page, size, keyword]}
+    response: {shape: paged_rows, fields: [userOID, fullName, jobOID, departmentOID]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, verified-workflow]
+    status: verified
+    mcp_exposed: true
+  - name: list_travel_applications
+    method: POST
+    path: /api/applications/v4/search
+    domain: travel
+    description: List travel applications visible to the current role.
+    request: {query: [roleType, page, size], body: object}
+    response: {shape: paged_rows, fields: [applicationOID, businessCode, status, closed]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, verified-workflow]
+    status: verified
+    mcp_exposed: true
+  - name: get_travel_application
+    method: GET
+    path: /api/application/{application_oid}?showValue=true
+    domain: travel
+    description: Read one travel application including custom values and budget detail.
+    request: {path: [application_oid], query: [showValue]}
+    response: {shape: object, fields: [applicationOID, businessCode, status, travelApplication, budgetDetailDTO]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, verified-workflow]
+    status: verified
+    mcp_exposed: true
+  - name: list_reimbursements
+    method: POST
+    path: /api/expense/reports/search/my
+    domain: reimbursements
+    description: List reimbursement reports visible to the current user.
+    request: {query: [roleType, page, size], body: object}
+    response: {shape: paged_rows, fields: [expenseReportOID, businessCode, status, totalAmount]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, verified-workflow]
+    status: verified
+    mcp_exposed: true
+  - name: get_reimbursement
+    method: GET
+    path: /api/v3/expense/reports/{expense_report_oid}
+    domain: reimbursements
+    description: Read a reimbursement report and its application linkage.
+    request: {path: [expense_report_oid]}
+    response: {shape: object, fields: [expenseReportOID, businessCode, status, applicationOID, totalAmount]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, verified-workflow]
+    status: verified
+    mcp_exposed: true
+  - name: list_report_invoice_items
+    method: GET
+    path: /api/expense/report/invoices/v2
+    domain: invoices
+    description: Read expense and receipt items associated with a reimbursement report.
+    request: {query: [expenseReportOID]}
+    response: {shape: object, fields: [invoiceViewDTOMap, invoiceList, totalAmount]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, verified-workflow]
+    status: verified
+    mcp_exposed: true
+  - name: get_invoice_item
+    method: GET
+    path: /api/invoices/{invoice_oid}
+    domain: invoices
+    description: Read one expense/invoice item.
+    request: {path: [invoice_oid], query: [isDateCombinedUTC]}
+    response: {shape: object, fields: [invoiceOID, expenseTypeName, amount, receiptList]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, verified-workflow]
+    status: verified
+    mcp_exposed: true
+  - name: list_available_forms
+    method: GET
+    path: /api/custom/forms/my/available
+    domain: configuration
+    description: List application or reimbursement forms available to the current user.
+    request: {query: [roleType, formType]}
+    response: {shape: rows, fields: [formOID, formName, formType]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [references/api-endpoints.md, live-read-2026-08-23]
+    status: verified
+    mcp_exposed: true
+  - name: list_expense_types
+    method: POST
+    path: /api/expense/type/byUser
+    domain: configuration
+    description: List expense types available for a report form and applicant.
+    request: {body: [expenseReportOID, applicantOID, formOID, roleType]}
+    response: {shape: rows, fields: [expenseTypeId, expenseTypeOID, name, invoiceRequired]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, verified-workflow]
+    status: verified
+    mcp_exposed: true
+  - name: create_travel_draft
+    method: POST
+    path: /api/travel/applications/draft
+    domain: travel
+    description: Create or save an editing travel application draft.
+    request: {body: travel_application_draft_dto, required_invariants: [status_1001, dynamic_form_ids]}
+    response: {shape: object, fields: [applicationOID, entityOID, businessCode, status]}
+    auth_required: true
+    mutation: true
+    risk_level: DRAFT_WRITE
+    discovered_from: [scripts/hly_workflow.py, live-draft-validation]
+    status: verified
+    mcp_exposed: true
+  - name: create_reimbursement_draft
+    method: POST
+    path: /api/expense/reports/custom/form/draft
+    domain: reimbursements
+    description: Create or save an editing reimbursement draft.
+    request: {query: [corporateFlag], body: reimbursement_draft_dto, required_invariants: [status_1001]}
+    response: {shape: object, fields: [expenseReportOID, entityOID, businessCode, status]}
+    auth_required: true
+    mutation: true
+    risk_level: DRAFT_WRITE
+    discovered_from: [scripts/hly_workflow.py, live-draft-validation]
+    status: verified
+    mcp_exposed: true
+  - name: upload_attachment
+    method: POST
+    path: /api/upload/attachment
+    domain: attachments
+    description: Upload one original attachment as multipart form data.
+    request: {content_type: multipart/form-data, fields: [attachmentType, file]}
+    response: {shape: object, fields: [fileName, fileURL, downloadUrl]}
+    auth_required: true
+    mutation: true
+    risk_level: DRAFT_WRITE
+    discovered_from: [scripts/hly_api.py, verified-workflow]
+    status: verified
+    mcp_exposed: true
+  - name: ocr_receipts
+    method: POST
+    path: /receipt/api/receipt/ocr/v3
+    domain: invoices
+    description: OCR uploaded invoice attachments in the context of a report.
+    request: {query: [roleType, client, isInternationalOCR, reportOID], body: attachment_list}
+    response: {shape: receipt_list, fields: [receiptOID, invoiceNumber, totalAmount]}
+    auth_required: true
+    mutation: true
+    risk_level: DRAFT_WRITE
+    discovered_from: [scripts/hly_workflow.py, live-invoice-validation]
+    status: verified
+    mcp_exposed: false
+  - name: verify_receipts
+    method: POST
+    path: /receipt/api/receipt/verify/batch
+    domain: invoices
+    description: Verify and enrich OCR receipt candidates.
+    request: {query: [roleType], body: invoice_info_list}
+    response: {shape: receipt_list, fields: [receiptOID, reimburseStatus, unusedAmount]}
+    auth_required: true
+    mutation: true
+    risk_level: DRAFT_WRITE
+    discovered_from: [scripts/hly_workflow.py, live-invoice-validation]
+    status: verified
+    mcp_exposed: false
+  - name: get_invoice_defaults
+    method: POST
+    path: /invoice/api/invoice/defaults
+    domain: invoices
+    description: Calculate default fields for an expense type and receipts.
+    request: {body: [expenseTypeId, receipts]}
+    response: {shape: object, fields: [data, expenseApportion]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, live-invoice-validation]
+    status: verified
+    mcp_exposed: false
+  - name: get_default_apportionment
+    method: POST
+    path: /api/expense/default/apportionment
+    domain: reimbursements
+    description: Calculate default expense apportionment for a draft report.
+    request: {body: [expenseReportOID, expenseTypeId, amount, currency, ownerOID]}
+    response: {shape: rows, fields: [companyOID, departmentOID, amount]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, live-invoice-validation]
+    status: verified
+    mcp_exposed: false
+  - name: calculate_receipt_tax
+    method: POST
+    path: /invoice/api/invoice/tax/amount/by/receipts
+    domain: invoices
+    description: Calculate tax and deductible amounts for receipt-backed expense data.
+    request: {body: invoice_defaults_with_receipts}
+    response: {shape: object, fields: [amount, taxAmount, deductibleAmount]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, live-invoice-validation]
+    status: verified
+    mcp_exposed: false
+  - name: create_receipt_expense
+    method: POST
+    path: /invoice/api/v5/invoices
+    domain: invoices
+    description: Create a receipt-backed expense item on an editing report.
+    request: {body: v5_invoice_dto, required_invariants: [target_report_status_1001]}
+    response: {shape: object, fields: [invoiceOID, entityOID]}
+    auth_required: true
+    mutation: true
+    risk_level: DRAFT_WRITE
+    discovered_from: [scripts/hly_workflow.py, live-invoice-validation]
+    status: verified
+    mcp_exposed: true
+  - name: validate_manual_expense
+    method: POST
+    path: /invoice/api/validate/invoice/async
+    domain: invoices
+    description: Preflight a no-receipt expense payload.
+    request: {body: v6_invoice_dto}
+    response: {shape: object, fields: [isError, validationErrors]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [scripts/hly_workflow.py, live-manual-expense-validation]
+    status: verified
+    mcp_exposed: false
+  - name: create_manual_expense
+    method: POST
+    path: /invoice/api/v6/invoices
+    domain: invoices
+    description: Create a no-receipt expense item on an editing report.
+    request: {body: v6_invoice_dto, required_invariants: [target_report_status_1001]}
+    response: {shape: object, fields: [invoiceOID, entityOID, invoiceSaveStatus]}
+    auth_required: true
+    mutation: true
+    risk_level: DRAFT_WRITE
+    discovered_from: [scripts/hly_workflow.py, live-manual-expense-validation]
+    status: verified
+    mcp_exposed: false
+  - name: list_companies
+    method: GET
+    path: /api/widget/company/all
+    domain: users_organization
+    description: Front-end literal for listing companies available to a widget.
+    request: {unknown: true}
+    response: {unknown: true}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [production-web-bundle-2026-08-23, live-read-2026-08-23]
+    status: verified
+    mcp_exposed: false
+  - name: search_cost_centers
+    method: GET
+    path: /api/cost/centers/search
+    domain: users_organization
+    description: Front-end literal for cost-center search.
+    request: {query: [keyword, page, size]}
+    response: {shape: rows}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [production-web-bundle-2026-08-23, live-read-2026-08-23]
+    status: verified
+    mcp_exposed: true
+  - name: list_projects
+    method: GET
+    path: /api/budget/structure/assign/project/queryAll
+    domain: users_organization
+    description: Front-end literal for project values used by budget structures.
+    request: {query_observed: [structureId]}
+    response: {unknown: true}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: list_currencies
+    method: GET
+    path: /api/currency/rate/list/all
+    domain: configuration
+    description: Front-end literal for currency/rate listing.
+    request: {query_observed: [setOfBooksId, language, enable]}
+    response: {unknown: true}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: list_countries
+    method: UNKNOWN
+    path: /api/areas/international/list
+    domain: configuration
+    description: Front-end literal for country/region listing.
+    request: {query_observed: [type, code]}
+    response: {unknown: true}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: list_travel_itineraries
+    method: GET
+    path: /api/travel/applications/itinerarys
+    domain: travel
+    description: Front-end literal for application itinerary retrieval.
+    request: {query: [applicationOID, userOID, withRequestDetail, withItemDetail]}
+    response: {shape: rows_or_empty}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [production-web-bundle-2026-08-23, live-read-2026-08-23]
+    status: verified
+    mcp_exposed: true
+  - name: list_travel_orders
+    method: UNKNOWN
+    path: /api/application/itinerary/budget/orders
+    domain: travel
+    description: Front-end literal for orders linked to an application itinerary budget.
+    request: {query_observed: [applicationOID]}
+    response: {unknown: true}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: loan_balance_summary
+    method: GET
+    path: /api/loanBill/my/amountAndCount
+    domain: loans
+    description: Front-end literal for current-user loan amount and count by status.
+    request: {query_observed: [statusList]}
+    response: {shape: object, fields: [count, currencyCode, stayWriteOffAmount]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [production-web-bundle-2026-08-23, live-read-2026-08-23]
+    status: verified
+    mcp_exposed: true
+  - name: loan_operation_history
+    method: UNKNOWN
+    path: /api/loanBill/operation/history
+    domain: loans
+    description: Front-end literal for loan operation history.
+    request: {unknown: true}
+    response: {unknown: true}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: reimbursement_approval_history
+    method: GET
+    path: /api/v2/expense/reports/approval/history
+    domain: approvals
+    description: Front-end literal for reimbursement approval history.
+    request: {query: [expenseReportOID]}
+    response: {shape: rows}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [production-web-bundle-2026-08-23, live-read-2026-08-23]
+    status: verified
+    mcp_exposed: true
+  - name: budget_balance_query
+    method: UNKNOWN
+    path: /api/budget/explain/v3/query
+    domain: budgets
+    description: Front-end literal for budget explanation/balance queries.
+    request: {unknown: true}
+    response: {unknown: true}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: bank_accounts
+    method: UNKNOWN
+    path: /api/contact/bank/account/my
+    domain: payments
+    description: Front-end literal for the current user's bank accounts.
+    request: {unknown: true}
+    response: {unknown: true}
+    auth_required: true
+    mutation: false
+    risk_level: FINANCIAL
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: submit_travel
+    method: UNKNOWN
+    path: /api/travel/applications/submit
+    domain: travel
+    description: Observed travel submission endpoint; intentionally unavailable to MCP.
+    request: {unknown: true}
+    response: {unknown: true}
+    auth_required: true
+    mutation: true
+    risk_level: STATE_CHANGE
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: submit_reimbursement
+    method: UNKNOWN
+    path: /api/v3/expense/report/submit
+    domain: reimbursements
+    description: Observed reimbursement submission endpoint; intentionally unavailable to MCP.
+    request: {unknown: true}
+    response: {unknown: true}
+    auth_required: true
+    mutation: true
+    risk_level: STATE_CHANGE
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: reject_expense_invoice
+    method: UNKNOWN
+    path: /api/approvals/reject/expensereport/invoice
+    domain: approvals
+    description: Observed rejection endpoint; intentionally unavailable to MCP.
+    request: {unknown: true}
+    response: {unknown: true}
+    auth_required: true
+    mutation: true
+    risk_level: STATE_CHANGE
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: delete_expense_invoice
+    method: UNKNOWN
+    path: /api/expense/reports/delete/invoice/{invoice_oid}
+    domain: invoices
+    description: Observed expense deletion family; intentionally unavailable to MCP.
+    request: {path_observed: [invoice_oid]}
+    response: {unknown: true}
+    auth_required: true
+    mutation: true
+    risk_level: DESTRUCTIVE
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: withdraw_reimbursement_appeal
+    method: UNKNOWN
+    path: /api/expense/report/withdraw/for/appeal
+    domain: reimbursements
+    description: Observed withdrawal endpoint; intentionally unavailable to MCP.
+    request: {unknown: true}
+    response: {unknown: true}
+    auth_required: true
+    mutation: true
+    risk_level: STATE_CHANGE
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: close_application
+    method: UNKNOWN
+    path: /api/applications/close
+    domain: travel
+    description: Observed application close endpoint; intentionally unavailable to MCP.
+    request: {query_observed: [applicationOID]}
+    response: {unknown: true}
+    auth_required: true
+    mutation: true
+    risk_level: STATE_CHANGE
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: update_payment_schedule
+    method: UNKNOWN
+    path: /api/payment/schedule/update
+    domain: payments
+    description: Observed payment-schedule mutation; intentionally unavailable to MCP.
+    request: {unknown: true}
+    response: {unknown: true}
+    auth_required: true
+    mutation: true
+    risk_level: FINANCIAL
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
