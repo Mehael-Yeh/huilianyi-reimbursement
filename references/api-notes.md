@@ -23,4 +23,4 @@
 
 ## 为什么不用普通网页登录
 
-官网登录入口可能落到 `console.huilianyi.com`，而本租户使用 A2 realm。API OAuth 会返回正确的 `realm_base_service_url`，比无头浏览器会话稳定。
+网页登录入口可能进入不同部署域。API OAuth 会返回当前账号对应的 `realm_base_service_url`，通常比无头浏览器会话稳定。

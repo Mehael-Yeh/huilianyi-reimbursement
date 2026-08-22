@@ -1,8 +1,49 @@
-# Historical documentation — sanitized
+# 费用保存
 
-This historical version of `references/invoice-landing.md` contained tenant-specific business examples.
-Those examples, including identities, identifiers, amounts and itinerary details,
-have been removed from repository history. No original business values are retained here.
+## 有票费用
 
-Use the current main-branch documentation for maintained technical guidance.
-Runtime implementation files are preserved unchanged by this documentation cleanup.
+1. 上传附件：`POST /api/upload/attachment`。
+2. OCR：`POST /receipt/api/receipt/ocr/v3`。
+3. 查验并取得富化票据信息：`POST /receipt/api/receipt/verify/batch`。
+4. 动态查询当前用户可用费用类型。
+5. 获取费用默认值和默认分摊。
+6. 计算税额和可报销金额。
+7. 使用 `POST /invoice/api/v5/invoices` 创建费用并绑定票据。
+8. 回读报告费用，核对类型、金额、票据和附件。
+
+关键约束：
+
+- `receipt.id` 可以为空，但必须有有效 `receiptOID` 和完整查验结果。
+- 税额接口返回的临时 `invoiceOID` 不能传入最终创建请求。
+- `amount` 与 `originalAmount` 必须等于查验返回的含税总额。本地文本层无金额时使用 OCR/查验金额；用户显式金额与查验金额不一致时停止。
+- 差旅同类发票复用申请中全部同类预算行的数值 `id` 列表；不能传 `budgetOID` 或标量。
+- 申请缺少实际类别时传空预算列表，不得错分费用。
+- 通行汇总单、行程单等材料写入费用顶层 `attachments`，不加入 `receiptList`。
+- 创建费用后不再回存整张报销单实体。
+
+## 无票费用
+
+1. 确认费用类型允许无票手工创建。
+2. 读取无异步错误的历史同类费用完整 DTO。
+3. 使用当前报销单的 `applicantJobId`。
+4. 调用默认分摊，并补齐金额、本位币金额、币种、费用类型、人员和单据公司字段。
+5. 设置 `withReceipt=false`、`receiptList=[]`、`valid=false`、`paymentCompanyOID=null`。
+6. 先调用异步预校验，再调用 `POST /invoice/api/v6/invoices`。
+7. 轮询回读直到明确成功或失败。
+
+无票异步状态：
+
+| `invoiceSaveStatus` | 含义 | 动作 |
+|---:|---|---|
+| 100 | 保存失败 | 标记失败并停止 |
+| 101 | 处理中 | 继续轮询 |
+| 102 | 保存成功 | 结合标签和费用字段验收 |
+| `null` | 同步保存或历史正常状态 | 无失败标签时可验收 |
+
+出差补贴还必须满足金额等于补贴天数乘以 100，客户名称允许为空。
+
+## 统一验收
+
+任何格式都只有在费用创建、票据绑定和回读完成后才算成功。上传、文本识别、OCR 或查验成功不能代替最终费用落账成功。
+
+失败时保留已有单据和费用，不自动删除；向用户报告费用编号、当前状态和可见错误标签。
