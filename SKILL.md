@@ -3,7 +3,7 @@ name: huilianyi-reimbursement
 description: 使用汇联易 A2 API 校准历史习惯、识别和分类票据、创建差旅申请/差旅报销/个人报销草稿、保存费用并生成核对表。仅处理草稿，永不提交、删除、关闭或撤回单据。
 license: MIT
 metadata:
-  version: 4.0.0
+  version: 4.1.0
   author: Mehael Yeh
   platforms: [linux, windows, darwin]
 ---
@@ -49,6 +49,10 @@ python scripts/hly.py history --username <账号> --output tmp/history.json
 ```bash
 python scripts/invoice_extract.py <文件...> --output tmp/invoice-review.json
 ```
+
+ZIP 若加密，先向用户索取密码；不得猜测、记录或写入仓库。交互运行时脚本会安全提示输入，也可仅在当前进程通过 `INVOICE_ZIP_PASSWORD` 提供。一个压缩包内同一发票的 PDF、OFD、XML 版本按发票号码合并，不能重复计金额。
+
+需要把 ZIP 内票据保存到汇联易时，使用 `--extract-dir <临时目录>` 解密并仅提取去重后选中的文件；可用 `--prefer-format OFD|XML|PDF` 指定同一发票优先使用的格式。后续 `add-invoice` 使用结果中的 `extractedFile`，不得直接上传仍处于加密状态的 ZIP。
 
 读取 [票据分类与金额提取](references/invoice-classification.md)：
 
@@ -107,7 +111,7 @@ python scripts/hly.py add-manual-expense \
   --field 补贴天数=<整数> --field 客户名称= --confirm-draft-write
 ```
 
-出差补贴为 100 元/天，金额必须等于补贴天数乘以 100；客户名称允许为空。无票费用必须补齐默认分摊接口省略的金额、币种、费用类型、人员和单据公司字段。
+出差补贴默认按“金额 = 补贴天数 × 100”计算，客户名称允许为空。该公式是跨公司通用默认值，不是强制审查标准；历史单据、公司制度或用户确认的标准不同时，以实际标准为准并在核对结果中提示差异。无票费用必须补齐默认分摊接口省略的金额、币种、费用类型、人员和单据公司字段。
 
 详细 API 顺序及状态见 [费用保存](references/invoice-landing.md)。
 

@@ -8,7 +8,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from invoice_extract import classify_invoice, extract_amount, extract_invoice_number, extract_text, inspect_invoices  # noqa: E402
+from invoice_extract import (  # noqa: E402
+    ArchivePasswordRequired,
+    _read_archive_entry,
+    classify_invoice,
+    extract_amount,
+    extract_invoice_number,
+    extract_selected_archive_files,
+    extract_text,
+    inspect_invoices,
+)
 
 
 class InvoiceExtractTests(unittest.TestCase):
@@ -55,6 +64,7 @@ class InvoiceExtractTests(unittest.TestCase):
 
     def test_invoice_number_uses_label_before_other_long_numbers(self):
         self.assertEqual(extract_invoice_number("纳税人识别号 123456789012345678 发票号码：12345678"), "12345678")
+        self.assertIsNone(extract_invoice_number("校验码 12345678901234567890"))
 
     def test_xml_and_ofd_text_extraction(self):
         xml = b"<Invoice><Item>OilCard</Item><Total>88.50</Total></Invoice>"
@@ -80,6 +90,43 @@ class InvoiceExtractTests(unittest.TestCase):
             rows = inspect_invoices(path)
             self.assertEqual(len(rows), 2)
             self.assertEqual({row["category"] for row in rows}, {"餐费", "里程补贴"})
+
+    def test_zip_merges_same_invoice_across_xml_ofd_and_pdf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "multi-format.zip"
+            xml = "<Invoice><InvoiceNumber>12345678</InvoiceNumber><ItemName>通行费</ItemName><TotalTaxIncludedAmount>12.30</TotalTaxIncludedAmount></Invoice>"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("xml/same.xml", xml)
+                nested = Path(directory) / "same.ofd"
+                with zipfile.ZipFile(nested, "w") as ofd:
+                    ofd.writestr("Doc_0/Content.xml", xml)
+                archive.write(nested, "ofd/same.ofd")
+            rows = inspect_invoices(path)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["formats"], ["OFD", "XML"])
+            self.assertEqual(rows[0]["amount"], 12.3)
+            self.assertEqual(rows[0]["category"], "过路费")
+
+            ofd_rows = inspect_invoices(path, preferred_format="OFD")
+            self.assertEqual(ofd_rows[0]["format"], "OFD")
+            self.assertEqual(ofd_rows[0]["invoiceNumber"], "12345678")
+            self.assertEqual(ofd_rows[0]["source"], "TotalTaxIncludedAmount")
+            output_dir = Path(directory) / "selected"
+            extracted = extract_selected_archive_files(path, ofd_rows, output_dir)
+            self.assertEqual(len(extracted), 1)
+            self.assertEqual(extracted[0].suffix, ".ofd")
+            self.assertEqual(Path(ofd_rows[0]["extractedFile"]), extracted[0])
+
+    def test_encrypted_entry_requests_password_before_reading(self):
+        class Item:
+            flag_bits = 1
+
+        class Archive:
+            def read(self, item, pwd=None):
+                raise AssertionError("read should not be attempted without a password")
+
+        with self.assertRaisesRegex(ArchivePasswordRequired, "requires a password"):
+            _read_archive_entry(Archive(), Item(), None)
 
 
 if __name__ == "__main__":

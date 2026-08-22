@@ -68,8 +68,30 @@ def recognized_receipt_amount(receipt: dict[str, Any]) -> float | None:
                 amount = round(float(normalized), 2)
             except ValueError:
                 continue
+            if key == "totalAmount" and any(
+                marker in container
+                for marker in ("fee", "unUsedAmount", "invoicedReceiptAmount", "dtoVersion", "receiptCode")
+            ):
+                amount = round(amount / 100, 2)
             if amount > 0:
                 return amount
+    return None
+
+
+def receipt_available_amount(receipt: dict[str, Any]) -> float | None:
+    """Return Huilianyi's remaining reimbursable receipt balance in yuan."""
+    for key in ("unUsedAmount", "unusedAmount", "availableAmount"):
+        value = receipt.get(key)
+        if value in (None, ""):
+            continue
+        normalized = re.sub(r"[^0-9.,-]", "", str(value)).replace(",", "")
+        try:
+            amount = float(normalized)
+        except ValueError:
+            continue
+        if key == "unUsedAmount":
+            amount /= 100
+        return round(amount, 2)
     return None
 
 
@@ -733,6 +755,11 @@ def add_invoice(
     receipt = _verified_receipt(verified)
     receipt["pdfUrl"] = receipt.get("pdfUrl") or upload.get("fileURL") or upload.get("downloadUrl")
     recognized_amount = recognized_receipt_amount(receipt)
+    available_amount = receipt_available_amount(receipt)
+    if available_amount is not None and available_amount <= 0:
+        raise ValueError(
+            "invoice has no reimbursable balance; it may already be locked or reimbursed in another report"
+        )
     if amount is None:
         if recognized_amount is None:
             raise ValueError("invoice amount is unavailable after OCR/verification; confirm it manually")
@@ -741,6 +768,10 @@ def add_invoice(
     if recognized_amount is not None and abs(amount - recognized_amount) > 0.01:
         raise ValueError(
             f"provided amount {amount:.2f} differs from verified invoice amount {recognized_amount:.2f}"
+        )
+    if available_amount is not None and amount - available_amount > 0.01:
+        raise ValueError(
+            f"invoice amount {amount:.2f} exceeds remaining reimbursable balance {available_amount:.2f}"
         )
 
     # Incremental dedup: if this invoice number already exists in the report, skip it.
@@ -827,6 +858,7 @@ def add_invoice(
         "expenseType": expense_type_name,
         "amount": float(amount),
         "recognizedAmount": recognized_amount,
+        "availableAmount": available_amount,
         "budgetMatch": budget_match,
         "attachments": [item.get("fileName") for item in attachments],
         "hotelCities": resolved_hotel_cities,
@@ -857,15 +889,19 @@ def _manual_expense_template(api: Client, expense_type_name: str) -> dict[str, A
 
 def validate_manual_expense_values(
     expense_type_name: str, amount: float, field_values: dict[str, Any]
-) -> None:
+) -> list[str]:
     if expense_type_name != "出差补贴":
-        return
+        return []
     raw_days = str(field_values.get("补贴天数", "")).strip()
     if not raw_days or not re.fullmatch(r"[1-9]\d*", raw_days):
         raise ValueError("出差补贴 requires a positive integer 补贴天数")
     expected = int(raw_days) * 100
     if round(float(amount), 2) != float(expected):
-        raise ValueError(f"出差补贴 amount must equal 补贴天数 × 100: expected {expected:.2f}")
+        return [
+            f"出差补贴按通用默认公式为 补贴天数 × 100（参考金额 {expected:.2f}）；"
+            "当前金额不同，请按本公司制度或用户确认结果填报"
+        ]
+    return []
 
 
 def _expense_views(api: Client, report_oid_value: str) -> list[dict[str, Any]]:
@@ -992,7 +1028,7 @@ def add_manual_expense(
     amount = round(float(amount), 2)
     if amount <= 0:
         raise ValueError("manual expense amount must be positive")
-    validate_manual_expense_values(expense_type_name, amount, field_values)
+    policy_warnings = validate_manual_expense_values(expense_type_name, amount, field_values)
 
     budget_match = {
         "expenseType": canonical_expense_type(expense_type_name),
@@ -1121,6 +1157,7 @@ def add_manual_expense(
         "invoiceStatus": settled.get("invoiceStatus"),
         "invoiceSaveStatus": settled.get("invoiceSaveStatus"),
         "missingRequiredFields": missing_required,
+        "policyWarnings": policy_warnings,
         "validationErrors": validation.get("validationErrors") if isinstance(validation, dict) else None,
     }
 
