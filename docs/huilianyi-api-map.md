@@ -5,15 +5,15 @@ Last researched: 2026-08-23. Status terms are strict: **verified** means a succe
 | Domain | Verified | Observed / partial | Unknown / research backlog | MCP policy |
 |---|---|---|---|---|
 | Auth | OAuth login, realm base URL | token expiry semantics partial | refresh/revocation | internal only |
-| Users & organization | current account/company, user search | company list, cost-center search, project values, currency and country paths observed | legal-entity/department/role schemas and methods | READ after verification |
-| Configuration | expense types, available forms | currency/country and form configuration paths observed | custom fields, policies, standards, city/hotel/transport tiers, approval templates | READ after verification |
+| Users & organization | current account/company, sanitized company ledgers, user search, cost centers | project values require a budget structure; current-tenant budget probe fails | legal-entity/department/role schemas and methods | READ; raw company security config hidden |
+| Configuration | expense types, available forms, currencies/rates | international-area endpoint observed but current tenant returns 404 | custom fields, policies, standards, city/hotel/transport tiers, approval templates | READ after verification |
 | Travel | list/detail, create draft | itinerary, itinerary-budget orders, air/hotel/rail/car families observed | schemas/methods, draft update semantics | READ + status-1001 draft only |
 | Reimbursements | list/detail, create draft, expense list | save endpoint may also update when identity exists | explicit update endpoint, delete, links to loans | READ + status-1001 draft only |
-| Invoices & receipts | upload, OCR, verify, detail, defaults, tax, V5/V6 expense creation | receipt occupation/remaining balance embedded in verification | invoice pool/list, release, delete, independent OCR types | READ + guarded draft attach |
-| Loans | none | amount/count summary and operation-history paths observed | list/detail/balance/write-off/reimbursement offset schemas | READ only after verification |
+| Invoices & receipts | upload, OCR, verify, detail, defaults, tax, V5/V6 expense creation, invoice-pool list, current-user expense list | receipt occupation/remaining balance embedded in verification | release/delete and independent OCR type schemas | READ + guarded draft attach |
+| Loans | amount/count summary, repayment summary, business-code search | operation-history path observed; write-off list currently fails | stable detail schema and reimbursement-offset semantics | READ only |
 | Approvals | status embedded in application/report | reimbursement approval history and broad approval families observed | method/schema/current approver/todo/done | READ only; all state changes disabled |
-| Payments | report payment fields | user bank-account and payment-schedule paths observed | status/records/account schemas | READ only; financial actions disabled |
-| Budgets | application budget detail | balance/explanation, items, departments, projects and control-rule families observed | safe query schemas and permissions | READ only |
+| Payments | report payment fields and sanitized payment schedules | bank-account query verified but deliberately unexposed | broader payment record schemas | sanitized READ only; accounts/actions disabled |
+| Budgets | application budget detail | budget-service prefix, structure/project and balance families observed; structure query returns system exception | safe query parameters and tenant permissions | no new MCP exposure |
 | Other | none | none | corporate payment, procurement, contracts, corporate cards, suppliers, journals, ERP, exports | case-by-case |
 
 ## Safety boundary

@@ -15,6 +15,11 @@ class RegistryTests(unittest.TestCase):
         validate_registry(entries)
         self.assertGreaterEqual(len(entries), 20)
         self.assertTrue(any(row["status"] == "verified" for row in entries))
+        names = {row["name"] for row in entries}
+        self.assertTrue({
+            "list_invoice_pool", "list_my_expense_items", "loan_repayment_summary",
+            "search_loans", "reimbursement_payment_schedules",
+        }.issubset(names))
 
     def test_state_change_cannot_be_exposed(self):
         entries = load_registry()

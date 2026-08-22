@@ -153,6 +153,10 @@ class HuilianyiClient:
             f"/api/custom/forms/my/available?roleType=TENANT&formType={form_type}"
         ))
 
+    def list_companies(self, *, enabled: bool = True) -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode({"enabled": str(enabled).lower()})
+        return unwrap_rows(self.api.request(f"/api/widget/company/all?{query}"))
+
     def list_cost_centers(self, keyword: str = "", page: int = 0, size: int = 50) -> list[dict[str, Any]]:
         query = urllib.parse.urlencode({"keyword": keyword, "page": page, "size": size})
         return unwrap_rows(self.api.request(f"/api/cost/centers/search?{query}"))
@@ -161,6 +165,56 @@ class HuilianyiClient:
         return unwrap_row(self.api.request(
             "/api/loanBill/my/amountAndCount?statusList=1005&statusList=1006"
         ))
+
+    def get_loan_repayment_summary(self) -> list[dict[str, Any]]:
+        return unwrap_rows(self.api.request("/api/loanBill/repayment/summary"))
+
+    def search_loans(self, keyword: str = "") -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode({"keyword": keyword})
+        return unwrap_rows(
+            self.api.request(f"/api/loanBill/query/business/code/by/keyword?{query}")
+        )
+
+    def list_currencies(
+        self,
+        set_of_books_id: str,
+        *,
+        language: str = "zh_cn",
+        enabled: bool = True,
+    ) -> list[dict[str, Any]]:
+        if not set_of_books_id:
+            raise HuilianyiError(ErrorCode.VALIDATION_ERROR, "set_of_books_id is required")
+        query = urllib.parse.urlencode({
+            "setOfBooksId": set_of_books_id,
+            "language": language,
+            "enable": str(enabled).lower(),
+        })
+        return unwrap_rows(self.api.request(f"/api/currency/rate/list/all?{query}"))
+
+    def list_invoice_pool(self, page: int = 0, size: int = 50) -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode({"page": page, "size": size})
+        return unwrap_rows(self.api.request(f"/api/receipt/pool/query/v2?{query}"))
+
+    def list_my_expense_items(self, page: int = 0, size: int = 50) -> list[dict[str, Any]]:
+        return unwrap_rows(
+            self.api.request("/api/invoices/my", "POST", {"page": page, "size": size})
+        )
+
+    def list_my_bank_accounts(self, *, enabled: bool | None = True) -> list[dict[str, Any]]:
+        account = self.get_current_user()
+        query = urllib.parse.urlencode({
+            "userOID": account.get("userOID") or "",
+            "enable": "" if enabled is None else str(enabled).lower(),
+            "sourceType": "BANKCARD_ACCOUNT",
+        })
+        return unwrap_rows(self.api.request(f"/api/contact/bank/account/my?{query}"))
+
+    def get_reimbursement_payment_schedules(self, report_oid: str) -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode({"expOid": report_oid})
+        value = self.api.request(f"/api/payment/schedule/query/by/expOid?{query}")
+        if isinstance(value, dict) and isinstance(value.get("paymentSchedules"), list):
+            return value["paymentSchedules"]
+        return []
 
     def list_travel_itineraries(
         self, application_oid: str, user_oid: str, *, with_details: bool = True

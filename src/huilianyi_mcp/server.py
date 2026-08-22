@@ -37,6 +37,12 @@ def get_company_info() -> dict[str, Any]:
 
 
 @mcp.tool()
+def list_ledgers() -> dict[str, Any]:
+    """List sanitized visible company ledgers for use with currency and budget reads."""
+    return tools.list_ledgers()
+
+
+@mcp.tool()
 def list_available_forms(form_type: int) -> dict[str, Any]:
     """List forms available to the user; form_type is 101 (application) or 102 (reimbursement)."""
     return tools.list_available_forms(form_type)
@@ -52,6 +58,42 @@ def list_cost_centers(keyword: str = "", page: int = 0, size: int = 50) -> dict[
 def get_loan_balance_summary() -> dict[str, Any]:
     """Return the current user's loan count and outstanding write-off amount summary."""
     return tools.get_loan_balance_summary()
+
+
+@mcp.tool()
+def get_loan_repayment_summary() -> dict[str, Any]:
+    """Return read-only grouped loan repayment totals for the current user."""
+    return tools.get_loan_repayment_summary()
+
+
+@mcp.tool()
+def search_loans(keyword: str = "") -> dict[str, Any]:
+    """Search visible loan documents by business-code keyword."""
+    return tools.search_loans(keyword)
+
+
+@mcp.tool()
+def list_currencies(set_of_books_id: str) -> dict[str, Any]:
+    """List enabled currencies and rates for an explicit visible ledger ID."""
+    return tools.list_currencies(set_of_books_id)
+
+
+@mcp.tool()
+def list_invoice_pool(page: int = 0, size: int = 50) -> dict[str, Any]:
+    """List normalized invoices/receipts in the current user's invoice pool."""
+    return tools.list_invoice_pool(page, size)
+
+
+@mcp.tool()
+def list_my_expense_items(page: int = 0, size: int = 50) -> dict[str, Any]:
+    """List the current user's reusable expense items with pagination."""
+    return tools.list_my_expense_items(page, size)
+
+
+@mcp.tool()
+def get_reimbursement_payment_status(reimbursement_oid: str) -> dict[str, Any]:
+    """Return sanitized read-only payment status rows for one reimbursement."""
+    return tools.get_reimbursement_payment_status(reimbursement_oid)
 
 
 @mcp.tool()

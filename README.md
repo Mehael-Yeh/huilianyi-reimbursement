@@ -61,10 +61,12 @@ python -m huilianyi_mcp.server
 Server 使用标准 stdio MCP，不监听端口。主要 READ Tools：
 
 - `get_current_user`、`get_company_info`、`search_users`
-- `list_available_forms`、`list_expense_types`、`list_cost_centers`
+- `list_ledgers`、`list_available_forms`、`list_expense_types`、`list_cost_centers`、`list_currencies`
 - `list_travel_applications`、`get_travel_application`、`list_travel_itineraries`
 - `list_reimbursements`、`get_reimbursement`、`list_invoice_items`、`get_invoice`
-- `get_loan_balance_summary`、`get_approval_history`
+- `list_invoice_pool`、`list_my_expense_items`
+- `get_loan_balance_summary`、`get_loan_repayment_summary`、`search_loans`
+- `get_approval_history`、`get_reimbursement_payment_status`
 
 受限 DRAFT_WRITE Tools：
 
@@ -73,7 +75,7 @@ Server 使用标准 stdio MCP，不监听端口。主要 READ Tools：
 - `upload_attachment`
 - `attach_invoice`
 
-所有返回值使用稳定的 `{ok, data}` 或 `{ok: false, error}` JSON envelope；分页结果附带 `pagination`。账号、公司和错误响应经过字段白名单或敏感字段清洗。
+所有返回值使用稳定的 `{ok, data}` 或 `{ok: false, error}` JSON envelope；分页结果附带 `pagination`。账号、公司、发票池、支付状态和错误响应经过字段白名单或敏感字段清洗。银行账户查询虽然已进入 SDK 和 Registry，但默认不作为 MCP Tool 暴露。
 
 ### Codex
 
@@ -119,6 +121,7 @@ default_tools_approval_mode = "writes"
 - [机器可读 Registry](data/api_registry.yaml)
 
 只读研究助手 `scripts/research_api_map.py` 会记录响应结构和生产前端字面路径，不保存账号值、OID、Token、Cookie 或签名 URL，也不会调用从 Bundle 中新发现的路径。
+第二轮固定端点验证使用 `scripts/research_round2_readonly.py`；它只调用已经在生产 Bundle 中确认方法的查询接口，并且只输出结构证据。
 
 ## 测试
 
