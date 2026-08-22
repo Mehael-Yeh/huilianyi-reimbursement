@@ -245,11 +245,17 @@ class WorkflowTests(unittest.TestCase):
                     validate_upload_file(path)
 
     def test_travel_subsidy_is_exactly_100_per_day(self):
-        validate_manual_expense_values("出差补贴", 2900, {"补贴天数": "29"})
+        validate_manual_expense_values(
+            "出差补贴", 2900, {"补贴天数": "29", "客户名称": "客户"}
+        )
         with self.assertRaisesRegex(ValueError, "expected 2900.00"):
-            validate_manual_expense_values("出差补贴", 29, {"补贴天数": "29"})
+            validate_manual_expense_values(
+                "出差补贴", 29, {"补贴天数": "29", "客户名称": "客户"}
+            )
         with self.assertRaisesRegex(ValueError, "positive integer"):
             validate_manual_expense_values("出差补贴", 100, {"补贴天数": "1.5"})
+        with self.assertRaisesRegex(ValueError, "cannot be blank in API mode"):
+            validate_manual_expense_values("出差补贴", 100, {"补贴天数": "1", "客户名称": ""})
 
     def test_hotel_fields_use_inferred_cities_and_full_report_range(self):
         cities = infer_hotel_cities(

@@ -828,6 +828,11 @@ def validate_manual_expense_values(
     expected = int(raw_days) * 100
     if round(float(amount), 2) != float(expected):
         raise ValueError(f"出差补贴 amount must equal 补贴天数 × 100: expected {expected:.2f}")
+    if not str(field_values.get("客户名称", "")).strip():
+        raise ValueError(
+            "出差补贴 客户名称 cannot be blank in API mode: the tenant accepts preflight "
+            "but later marks the expense INVOICE_ASYNC_ERROR; leave this expense for web entry"
+        )
 
 
 def _expense_views(api: Client, report_oid_value: str) -> list[dict[str, Any]]:
