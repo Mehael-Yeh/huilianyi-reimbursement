@@ -1,6 +1,6 @@
 # 发票纯 API 落账
 
-2026-08-21 使用 4 张真实 PDF 对差旅报销与个人报销完成端到端验证。
+2026-08-21 使用 4 张真实 PDF 对差旅报销与个人报销完成端到端验证。2026-08-22 又验证了格式白名单、OFD 最终保存和无票费用异步终态。
 
 ## 顺序
 
@@ -65,12 +65,17 @@ body["valid"] = True
 
 ## 无票手录费用
 
-已于 2026-08-22 对编辑中差旅报销完成端到端验证：不上传附件、不调用 OCR/查验，创建 1.00 元“出差补贴”后，报告总额和费用行数量均正确增加。
+2026-08-22 复核证明早先“创建 1.00 元出差补贴成功”的结论错误：费用虽进入列表并增加总额，但 `invoiceSaveStatus=100`，带 `INVOICE_ASYNC_ERROR/费用保存失败`，不能算成功。
 
 1. 动态查询费用类型，确认 `invoiceRequired=false`、`pasteInvoiceNeeded=false`、允许手工创建。
-2. 从历史同类无票费用复制自定义字段结构并清空旧值，填写所有必填项。
-3. 调用默认分摊；有同类申请预算时传数值预算行 ID 列表，否则传空列表。
-4. 请求设置 `withReceipt=false`、`receiptList=[]`、`receipts=[]`。
-5. 先调用 `POST /invoice/api/validate/invoice/async`。
-6. 最终调用 `POST /invoice/api/v6/invoices`。本租户 v5 无票请求返回通用 500，v6 成功。
-7. 回读 invoices/v2，确认费用 `withReceipt=false` 且 `receiptList` 为空。
+2. 从 `FINISHED` 的历史同类无票费用读取 `/api/invoices/{oid}` 完整详情；列表摘要缺少岗位等保存上下文，不能作为模板。
+3. 出差补贴强制 `金额 = 补贴天数 × 100`。
+4. 调用默认分摊；有同类申请预算时传数值预算行 ID 列表，否则传空列表。
+5. 请求设置 `withReceipt=false`、`receiptList=[]`、`receipts=[]`。
+6. 先调用 `POST /invoice/api/validate/invoice/async`；预校验报错时停止，不创建。
+7. 仅在预校验无错时调用 `POST /invoice/api/v6/invoices`。
+8. 轮询 invoices/v2；必须到 `FINISHED` 且无异步失败标签。客户名称留空的真实测试仍失败，当前不能宣称 API 全链路可用。
+
+## OFD
+
+真实 OFD `25322000000577483943` 可完成上传、OCR、查验、费用类型和税额计算，但最终 `v5/invoices` 返回 `SYSTEM_EXCEPTION` 500，未新增费用行。OFD 当前状态是“识别链路通过、费用落账失败”；不要用 OCR 成功替代全链路成功。

@@ -125,13 +125,18 @@ class Client:
                 value = raw
             raise HLYError(method, path, exc.code, value) from exc
 
-    def upload_invoice(self, file_path: str | Path) -> dict[str, Any]:
+    def upload_attachment(
+        self, file_path: str | Path, attachment_type: str = "INVOICE_IMAGES"
+    ) -> dict[str, Any]:
         path = Path(file_path)
         boundary = "----HLYAgent" + uuid.uuid4().hex
         mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         body = b"".join(
             [
-                f"--{boundary}\r\nContent-Disposition: form-data; name=\"attachmentType\"\r\n\r\nINVOICE_IMAGES\r\n".encode(),
+                (
+                    f"--{boundary}\r\nContent-Disposition: form-data; name=\"attachmentType\"\r\n\r\n"
+                    f"{attachment_type}\r\n"
+                ).encode(),
                 (
                     f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{path.name}\"\r\n"
                     f"Content-Type: {mime}\r\n\r\n"
@@ -162,6 +167,9 @@ class Client:
             except json.JSONDecodeError:
                 value = raw
             raise HLYError("POST", "/api/upload/attachment", exc.code, value) from exc
+
+    def upload_invoice(self, file_path: str | Path) -> dict[str, Any]:
+        return self.upload_attachment(file_path, "INVOICE_IMAGES")
 
 
 def clients_from_auth(auth: dict[str, Any]) -> tuple[Client, Client]:

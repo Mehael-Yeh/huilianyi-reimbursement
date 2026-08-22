@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,7 +15,11 @@ from hly_workflow import (  # noqa: E402
     build_travel_report_draft,
     build_v5_body,
     compare_travel_amounts,
+    hotel_field_values,
+    infer_hotel_cities,
     report_date_values,
+    validate_manual_expense_values,
+    validate_upload_file,
 )
 
 
@@ -222,7 +227,49 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('"receiptList": []', manual)
         self.assertIn('/invoice/api/validate/invoice/async', manual)
         self.assertIn('/invoice/api/v6/invoices', manual)
+        self.assertIn('manual expense preflight failed; no expense was created', manual)
+        self.assertIn('wait_for_expense_save(', manual)
         self.assertNotIn("upload_invoice", manual)
+
+    def test_upload_whitelist_accepts_only_supported_invoice_documents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for suffix in (".pdf", ".ofd", ".zip", ".xml", ".PDF"):
+                path = root / f"invoice{suffix}"
+                path.write_bytes(b"test")
+                self.assertEqual(validate_upload_file(path), path)
+            for suffix in (".png", ".jpg", ".xlsx", ".rar", ".7z"):
+                path = root / f"invoice{suffix}"
+                path.write_bytes(b"test")
+                with self.assertRaisesRegex(ValueError, "unsupported upload format"):
+                    validate_upload_file(path)
+
+    def test_travel_subsidy_is_exactly_100_per_day(self):
+        validate_manual_expense_values("出差补贴", 2900, {"补贴天数": "29"})
+        with self.assertRaisesRegex(ValueError, "expected 2900.00"):
+            validate_manual_expense_values("出差补贴", 29, {"补贴天数": "29"})
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            validate_manual_expense_values("出差补贴", 100, {"补贴天数": "1.5"})
+
+    def test_hotel_fields_use_inferred_cities_and_full_report_range(self):
+        cities = infer_hotel_cities(
+            "上海汉成酒店管理有限公司", "昆山某酒店", "无锡酒店"
+        )
+        self.assertEqual(cities, ["上海", "昆山", "无锡"])
+        data = hotel_field_values(
+            [
+                {"name": "入住城市", "fieldType": "LOCATION"},
+                {"name": "开始结束日期", "fieldType": "START_DATE_AND_END_DATE"},
+            ],
+            cities,
+            "2026-06-02",
+            "2026-06-30",
+        )
+        self.assertEqual(data[0]["showValue"], "上海，昆山，无锡")
+        date_value = __import__("json").loads(data[1]["value"])
+        self.assertEqual(date_value["startDate"], "2026-06-02T00:00:00Z")
+        self.assertEqual(date_value["endDate"], "2026-06-30T23:59:59Z")
+        self.assertEqual(date_value["duration"], 29.0)
 
 
 if __name__ == "__main__":

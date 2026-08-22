@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import time
 import urllib.parse
 from datetime import date, datetime, time as dt_time, timedelta, timezone
@@ -21,6 +22,63 @@ from hly_api import Client, unwrap_row, unwrap_rows
 DRAFT_STATUS = 1001
 APPROVED_APPLICATION_STATUS = 1003
 TRAVEL_TYPE_ALIASES = {"市内交通费": "其他交通", "其他交通费": "其他交通"}
+ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".ofd", ".zip", ".xml"}
+HOTEL_CITY_CODES = {
+    "上海": "CHN031000000",
+    "南京": "CHN032001000",
+    "无锡": "CHN032002000",
+    "常州": "CHN032004000",
+    "苏州": "CHN032005000",
+    "昆山": "CHN032005830",
+    "杭州": "CHN033001000",
+    "嘉兴": "CHN033004000",
+}
+
+
+def validate_upload_file(file_path: str | Path) -> Path:
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    suffix = path.suffix.lower()
+    if suffix not in ALLOWED_UPLOAD_SUFFIXES:
+        allowed = ", ".join(sorted(ALLOWED_UPLOAD_SUFFIXES))
+        raise ValueError(f"unsupported upload format {suffix or '<none>'}; allowed: {allowed}")
+    return path
+
+
+def infer_hotel_cities(*values: Any) -> list[str]:
+    text = " ".join(json.dumps(value, ensure_ascii=False, default=str) for value in values if value)
+    return sorted(
+        (city for city in HOTEL_CITY_CODES if city in text),
+        key=text.index,
+    )
+
+
+def hotel_field_values(
+    data: list[dict[str, Any]], cities: list[str], start: str, end: str
+) -> list[dict[str, Any]]:
+    result = copy.deepcopy(data)
+    start_date = _parse_date(start)
+    end_date = _parse_date(end)
+    duration = float((end_date - start_date).days + 1)
+    date_value = json.dumps(
+        {
+            "startDate": f"{start_date.isoformat()}T00:00:00Z",
+            "endDate": f"{end_date.isoformat()}T23:59:59Z",
+            "duration": duration,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    for field in result:
+        name = field.get("name") or field.get("messageKey")
+        if name in {"入住城市", "location"} and cities:
+            codes = [HOTEL_CITY_CODES[city] for city in cities if city in HOTEL_CITY_CODES]
+            field["value"] = ",".join(codes) if codes else "，".join(cities)
+            field["showValue"] = "，".join(cities)
+        elif name in {"开始结束日期", "dateCombined"}:
+            field["value"] = field["showValue"] = date_value
+    return result
 
 
 def business_code(item: dict[str, Any]) -> str | None:
@@ -571,6 +629,32 @@ def build_v5_body(tax_result: dict[str, Any], common: dict[str, Any]) -> dict[st
     return body
 
 
+def report_travel_date_range(api: Client, report: dict[str, Any]) -> tuple[str, str]:
+    application_oid_value = report.get("applicationOID")
+    date_map = report.get("applicationStartAndEndDateMap") or {}
+    if application_oid_value:
+        start = date_map.get(f"{application_oid_value}+start_date")
+        end = date_map.get(f"{application_oid_value}+end_date")
+        if start and end:
+            return str(start)[:10], str(end)[:10]
+        application = get_application(api, application_oid_value)
+        travel = application.get("travelApplication") or {}
+        china = timezone(timedelta(hours=8))
+        parsed = []
+        for value in (travel.get("startDate"), travel.get("endDate")):
+            if not value:
+                break
+            parsed.append(
+                datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                .astimezone(china)
+                .date()
+                .isoformat()
+            )
+        if len(parsed) == 2:
+            return parsed[0], parsed[1]
+    raise ValueError("hotel expense requires the linked report travel date range")
+
+
 def add_invoice(
     api: Client,
     gateway: Client,
@@ -578,10 +662,16 @@ def add_invoice(
     file_path: str | Path,
     expense_type_name: str,
     amount: float,
+    attachment_paths: list[str | Path] | None = None,
+    hotel_cities: list[str] | None = None,
 ) -> dict[str, Any]:
     """Upload, recognize, verify, classify, and bind one invoice to a draft."""
     if report.get("status") != DRAFT_STATUS:
         raise ValueError("invoices may only be added to an editing draft (status 1001)")
+    invoice_path = validate_upload_file(file_path)
+    attachment_files = [validate_upload_file(path) for path in (attachment_paths or [])]
+    if attachment_files and expense_type_name != "过路费":
+        raise ValueError("supporting toll documents may only be attached to 过路费")
     report_oid_value = report["expenseReportOID"]
     types = available_expense_types(api, report)
     if expense_type_name not in types:
@@ -601,7 +691,7 @@ def add_invoice(
         application = get_application(api, report["applicationOID"])
         budget_match = application_budget_match(application, expense_type_name)
 
-    upload = api.upload_invoice(file_path)
+    upload = api.upload_invoice(invoice_path)
     ocr = gateway.request(
         "/receipt/api/receipt/ocr/v3?roleType=TENANT&client=WEB&isInternationalOCR=false"
         f"&districtCode=&reportOID={urllib.parse.quote(report_oid_value)}",
@@ -635,6 +725,17 @@ def add_invoice(
         {"expenseTypeId": expense_type_id, "receipts": [receipt]},
     )
     defaults = unwrap_row(defaults_value)
+    data = copy.deepcopy(defaults.get("data") or []) if isinstance(defaults, dict) else []
+    resolved_hotel_cities: list[str] = []
+    if expense_type_name == "酒店":
+        resolved_hotel_cities = list(dict.fromkeys(hotel_cities or infer_hotel_cities(
+            invoice_path.name, receipt
+        )))
+        if not resolved_hotel_cities:
+            raise ValueError("cannot infer hotel city; pass --hotel-city explicitly")
+        start, end = report_travel_date_range(api, report)
+        data = hotel_field_values(data, resolved_hotel_cities, start, end)
+    attachments = [api.upload_attachment(path) for path in attachment_files]
     apportionment = unwrap_rows(api.request(
         "/api/expense/default/apportionment",
         "POST",
@@ -666,8 +767,8 @@ def add_invoice(
         "receipts": [receipt],
         "withReceipt": True,
         "valid": True,
-        "attachments": [],
-        "data": [],
+        "attachments": attachments,
+        "data": data,
         "expenseApportion": apportionment,
     }
     tax_body = dict(defaults) if isinstance(defaults, dict) else {}
@@ -689,6 +790,8 @@ def add_invoice(
         "expenseType": expense_type_name,
         "amount": float(amount),
         "budgetMatch": budget_match,
+        "attachments": [item.get("fileName") for item in attachments],
+        "hotelCities": resolved_hotel_cities,
     }
 
 
@@ -699,9 +802,94 @@ def _manual_expense_template(api: Client, expense_type_name: str) -> dict[str, A
             continue
         invoice_data = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={oid}"))
         for view in (invoice_data.get("invoiceViewDTOMap") or {}).values():
-            if view.get("expenseTypeName") == expense_type_name and not view.get("withReceipt"):
+            if (
+                view.get("expenseTypeName") == expense_type_name
+                and not view.get("withReceipt")
+                and view.get("invoiceStatus") == "FINISHED"
+                and view.get("invoiceSaveStatus") != 100
+            ):
+                invoice_oid_value = view.get("invoiceOID") or view.get("entityOID")
+                if invoice_oid_value:
+                    return copy.deepcopy(unwrap_row(api.request(
+                        f"/api/invoices/{invoice_oid_value}?isDateCombinedUTC=false"
+                    )))
                 return copy.deepcopy(view)
     return {}
+
+
+def validate_manual_expense_values(
+    expense_type_name: str, amount: float, field_values: dict[str, Any]
+) -> None:
+    if expense_type_name != "出差补贴":
+        return
+    raw_days = str(field_values.get("补贴天数", "")).strip()
+    if not raw_days or not re.fullmatch(r"[1-9]\d*", raw_days):
+        raise ValueError("出差补贴 requires a positive integer 补贴天数")
+    expected = int(raw_days) * 100
+    if round(float(amount), 2) != float(expected):
+        raise ValueError(f"出差补贴 amount must equal 补贴天数 × 100: expected {expected:.2f}")
+
+
+def _expense_views(api: Client, report_oid_value: str) -> list[dict[str, Any]]:
+    value = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={report_oid_value}"))
+    return list((value.get("invoiceViewDTOMap") or {}).values())
+
+
+def _find_expense_view(
+    api: Client, report_oid_value: str, identity: str
+) -> dict[str, Any] | None:
+    for view in _expense_views(api, report_oid_value):
+        if identity in {
+            str(view.get("entityOID") or ""),
+            str(view.get("invoiceOID") or ""),
+            str(view.get("expenseCode") or ""),
+        }:
+            return view
+    return None
+
+
+def _expense_save_fingerprint(view: dict[str, Any] | None) -> tuple[Any, ...] | None:
+    if not view:
+        return None
+    return (
+        view.get("invoiceStatus"),
+        view.get("invoiceSaveStatus"),
+        view.get("lastModifiedDate"),
+        tuple(sorted((label.get("type"), label.get("name")) for label in view.get("invoiceLabels") or [])),
+    )
+
+
+def wait_for_expense_save(
+    api: Client,
+    report_oid_value: str,
+    identity: str,
+    previous_fingerprint: tuple[Any, ...] | None = None,
+    timeout_seconds: float = 45,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last = None
+    while time.monotonic() < deadline:
+        view = _find_expense_view(api, report_oid_value, identity)
+        if view:
+            last = view
+            fingerprint = _expense_save_fingerprint(view)
+            if previous_fingerprint is None or fingerprint != previous_fingerprint:
+                labels = view.get("invoiceLabels") or []
+                async_error = any(
+                    label.get("type") == "INVOICE_ASYNC_ERROR" or label.get("name") == "费用保存失败"
+                    for label in labels
+                )
+                if async_error or view.get("invoiceSaveStatus") == 100:
+                    raise RuntimeError("expense asynchronous save failed")
+                if view.get("invoiceStatus") == "FINISHED":
+                    return view
+        time.sleep(1)
+    status = {
+        "invoiceStatus": (last or {}).get("invoiceStatus"),
+        "invoiceSaveStatus": (last or {}).get("invoiceSaveStatus"),
+        "labels": [label.get("name") for label in (last or {}).get("invoiceLabels") or []],
+    }
+    raise TimeoutError(f"expense did not reach FINISHED state: {status}")
 
 
 def add_manual_expense(
@@ -712,6 +900,7 @@ def add_manual_expense(
     amount: float,
     occurred_date: str | date,
     field_values: dict[str, Any],
+    wait_timeout_seconds: float = 45,
 ) -> dict[str, Any]:
     """Create a no-receipt manual expense and bind it to an editing report."""
     if report.get("status") != DRAFT_STATUS:
@@ -727,6 +916,7 @@ def add_manual_expense(
     amount = round(float(amount), 2)
     if amount <= 0:
         raise ValueError("manual expense amount must be positive")
+    validate_manual_expense_values(expense_type_name, amount, field_values)
 
     budget_match = {
         "expenseType": canonical_expense_type(expense_type_name),
@@ -752,6 +942,11 @@ def add_manual_expense(
     payload = _manual_expense_template(api, expense_type_name)
     if not payload:
         raise LookupError(f"no historical no-receipt template found: {expense_type_name}")
+    if not payload.get("ownerJobId") or not payload.get("ownerJob"):
+        owner_template = _manual_expense_template(api, expense_type_name)
+        payload["ownerJobId"] = owner_template.get("ownerJobId")
+        payload["ownerJob"] = owner_template.get("ownerJob")
+    owner_job = payload.get("ownerJob") or {}
     data = payload.get("data") or []
     for field in data:
         key = field.get("name") or field.get("messageKey")
@@ -761,15 +956,19 @@ def add_manual_expense(
             field["value"] = field["showValue"] = str(field_values[key])
         else:
             field["value"] = field["showValue"] = ""
-        if field.get("required") and not field.get("value"):
-            raise ValueError(f"required manual expense field missing: {key}")
+        if field.get("mappedColumnId") == 111:
+            payload["stringCol1"] = field.get("value") or None
     local_date = _parse_date(occurred_date)
     china = timezone(timedelta(hours=8))
     created = datetime.combine(local_date, dt_time.min, tzinfo=china).astimezone(timezone.utc)
-    for key in (
-        "id", "invoiceOID", "entityOID", "expenseReportInvoiceOID", "expenseReportOID",
+    identity_keys = (
+        "id", "invoiceOID", "entityOID", "expenseReportInvoiceOID", "expenseCode",
+    )
+    for key in identity_keys + (
+        "expenseReportOID",
         "createTime", "lastModifiedDate", "invoiceLabels", "invoiceLabelDTOS", "approvalOperates",
-        "expenseCode", "paymentScheduleId", "referenceId", "applicationNumber", "applicationTitle",
+        "paymentScheduleId", "referenceId", "applicationNumber", "applicationTitle",
+        "invoiceSaveStatus", "invoiceStatus", "invoiceStatusId",
     ):
         payload.pop(key, None)
     payload.update({
@@ -787,26 +986,58 @@ def add_manual_expense(
         "currencyCode": "CNY", "invoiceCurrencyCode": "CNY",
         "createdDate": created.isoformat(timespec="seconds").replace("+00:00", "Z"),
         "currencyDate": f"{local_date.isoformat()} 00:00:00",
-        "companyOID": report.get("companyOID"), "paymentType": 1001,
+        "companyOID": owner_job.get("companyOID") or payload.get("companyOID"),
+        "companyID": owner_job.get("companyId") or payload.get("companyID"),
+        "paymentCompanyOID": report.get("companyOID"), "paymentType": 1001,
         "withReceipt": False, "receiptList": [], "receipts": [],
         "attachments": [], "data": data, "expenseApportion": apportionment,
-        "comment": "", "valid": False, "createInvoice": True,
+        "comment": "", "valid": True, "createInvoice": True,
         "applicationList": [], "relatedApplicationItineraryBudgetVOList": None,
     })
+    for key in (
+        "nonVATinclusiveAmount", "nonVatBaseAmount", "originalApprovedNonVat",
+        "baseApprovedNonVat", "actualCurrencyAmount", "baseAmount", "orderAmount",
+        "expenseAmount", "expenseAmortiseAmount",
+    ):
+        payload[key] = amount
     validation = unwrap_row(
         gateway.request("/invoice/api/validate/invoice/async?roleType=TENANT", "POST", payload)
     )
     if isinstance(validation, dict) and validation.get("isError"):
-        raise ValueError(f"manual expense validation failed: {validation.get('validationErrors')}")
+        raise ValueError(
+            "manual expense preflight failed; no expense was created: "
+            f"{validation.get('validationErrors')}"
+        )
     query = (
         "/invoice/api/v6/invoices?roleType=TENANT&isDateCombinedUTC=false&utcTime=true"
         "&needValidateExpBaseAmountOverReceipt=true"
     )
     created_expense = unwrap_row(gateway.request(query, "POST", payload))
+    identity = str(
+        created_expense.get("invoiceOID")
+        or created_expense.get("entityOID")
+        or payload.get("entityOID")
+        or payload.get("invoiceOID")
+    )
+    settled = wait_for_expense_save(
+        api,
+        report["expenseReportOID"],
+        identity,
+        timeout_seconds=wait_timeout_seconds,
+    )
+    missing_required = [
+        (field.get("name") or field.get("messageKey"))
+        for field in data
+        if field.get("required") and not field.get("value")
+    ]
     return {
-        "invoiceOID": created_expense.get("invoiceOID") or created_expense.get("entityOID"),
+        "invoiceOID": settled.get("entityOID") or settled.get("invoiceOID") or identity,
         "expenseType": expense_type_name, "amount": amount,
         "withReceipt": False, "budgetMatch": budget_match,
+        "invoiceStatus": settled.get("invoiceStatus"),
+        "invoiceSaveStatus": settled.get("invoiceSaveStatus"),
+        "missingRequiredFields": missing_required,
+        "validationErrors": validation.get("validationErrors") if isinstance(validation, dict) else None,
     }
 
 
@@ -838,16 +1069,36 @@ def verify_report_invoices(api: Client, report_oid_value: str) -> dict[str, Any]
     detail = get_report(api, report_oid_value)
     invoice_data = unwrap_row(api.request(f"/api/expense/report/invoices/v2?expenseReportOID={report_oid_value}"))
     views = list((invoice_data.get("invoiceViewDTOMap") or {}).values())
+    asynchronous_failures = []
+    for view in views:
+        labels = view.get("invoiceLabels") or []
+        if view.get("invoiceSaveStatus") == 100 or any(
+            label.get("type") == "INVOICE_ASYNC_ERROR" or label.get("name") == "费用保存失败"
+            for label in labels
+        ):
+            asynchronous_failures.append(view.get("expenseCode") or view.get("entityOID"))
     return {
         "businessCode": detail.get("businessCode"),
         "status": detail.get("status"),
         "totalAmount": detail.get("totalAmount"),
         "invoiceCount": len(invoice_data.get("expenseReportInvoices") or []),
         "manualExpenseCount": sum(1 for view in views if not view.get("withReceipt")),
+        "asynchronousSaveFailures": asynchronous_failures,
+        "businessAccepted": not asynchronous_failures,
         "invoiceNumbers": sorted(existing_invoice_numbers(api, report_oid_value)),
         "expenses": [
-            {"expenseType": view.get("expenseTypeName"), "amount": view.get("amount"),
-             "withReceipt": bool(view.get("withReceipt")), "receiptCount": len(view.get("receiptList") or []),
+            {"expenseOID": view.get("entityOID") or view.get("invoiceOID"),
+             "expenseCode": view.get("expenseCode"),
+             "expenseType": view.get("expenseTypeName"), "amount": view.get("amount"),
+              "withReceipt": bool(view.get("withReceipt")), "receiptCount": len(view.get("receiptList") or []),
+             "invoiceStatus": view.get("invoiceStatus"),
+             "invoiceSaveStatus": view.get("invoiceSaveStatus"),
+             "labels": [label.get("name") for label in view.get("invoiceLabels") or []],
+             "attachments": [item.get("fileName") for item in view.get("attachments") or []],
+             "fields": {
+                 field.get("name") or field.get("messageKey"): field.get("showValue") or field.get("value")
+                 for field in view.get("data") or []
+             },
              "invoiceNumbers": [
                  str(r.get("invoiceNumber") or r.get("invoiceCode") or "").strip()
                  for r in view.get("receiptList") or [] if r.get("invoiceNumber") or r.get("invoiceCode")

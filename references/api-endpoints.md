@@ -10,6 +10,7 @@
 - `POST /api/expense/reports/search/my?roleType=TENANT&page=0&size=100`
 - `GET /api/v3/expense/reports/{oid}`
 - `GET /api/expense/report/invoices/v2?expenseReportOID={oid}`
+- `GET /api/invoices/{invoiceOID}?isDateCombinedUTC=false`
 - `GET /api/users/v3/search?roleType=TENANT&size=20&page=0&keyword={name}`
 - `GET /api/custom/forms/my/available?roleType=TENANT&formType={101|102}`
 - `POST /api/expense/type/byUser`
@@ -28,6 +29,8 @@
 - `POST /api/expense/default/apportionment`
 - `POST /invoice/api/invoice/tax/amount/by/receipts`
 - `POST /invoice/api/v5/invoices`
+- `POST /invoice/api/validate/invoice/async`
+- `POST /invoice/api/v6/invoices`
 
 ## 禁止端点
 

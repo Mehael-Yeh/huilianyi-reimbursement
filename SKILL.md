@@ -3,7 +3,7 @@ name: huilianyi-reimbursement
 description: "触发: 报销/差旅/汇联易/填报销单。读取历史校准并先分类票据；个人报销独立建单，差旅按申请审批通过后再关联报销的顺序创建；永不提交或删除。"
 license: MIT
 metadata:
-  version: 3.3.0
+  version: 3.4.0
   author: Hermes Agent
   platforms: [linux, windows, darwin]
   hermes:
@@ -101,13 +101,13 @@ python scripts/hly.py history --username <账号> --output tmp/hly-history.json
 
 **发票交付格式（可直接丢进目录/压缩包）：**
 - **PDF**（.pdf）：电子发票、扫描件（主格式）
-- **OFD**（.ofd）：新版数电票（国家税务总局推广格式）。本质是 ZIP 容器，引擎用 `read_ofd_text()` 解压提文本层分类（实测通过），与 PDF 同规则
-- **图片**（.png/.jpg/.jpeg）：票据照片（作为附件）
-- **里程表**（.xls/.xlsx/.xlsm）：里程补贴附件
-- **压缩包**（.zip/.rar/.7z）：支持自动解压后递归扫描（分类引擎 `_expand_archives`）
-- 直接丢一个目录（含子目录）或压缩包进来均可，引擎递归遍历并解压。
+- **OFD**（.ofd）：新版数电票；可提取文本并进入汇联易 OCR，但当前租户的最终费用保存实测仍可能返回 500，不能宣称全链路成功
+- **ZIP**（.zip）：电子票据打包文件
+- **XML**（.xml）：电子票据结构化原件
 
-> 提示：OFD 引擎提取到**分类/金额/日期**完整可靠；个别 OFD 的发票号提取可能为空（OFD 标签/值分行布局所致），落账去重不受影响（用汇联易端 OCR 发票号）。
+上传白名单严格限定为 PDF/OFD/ZIP/XML。PNG/JPG/JPEG 等图片即使汇联易支持也不上传；RAR/7Z、Office 文件等也不作为本 skill 的发票或费用附件上传。
+
+> OFD 必须完成“上传→OCR→查验→费用保存→回读”后才能标记成功。2026-08-22 的真实 OFD 测试在最终 `v5/invoices` 返回 500，未新增费用行；在修复最终保存前只标记为“识别通过、落账失败”。
 
 - 差旅：过路费、酒店、停车费、打车费、其他交通。
 - 个人：餐费、礼品费、里程补贴。
@@ -225,6 +225,10 @@ python scripts/hly.py add-invoice \
   --confirm-draft-write
 ```
 
+酒店费用必须从酒店销售方名称/地址推断入住城市；多地用中文逗号连接，例如 `上海，昆山，无锡`。开始结束日期统一写关联差旅报销单的完整起止日期。无法可靠判断城市时停止并要求用户给出 `--hotel-city`，不得猜测。
+
+过路费材料若包含通行费汇总单/通行单，该文件不计金额、不做第二张发票 OCR，而以 `--attachment <文件>` 上传到过路费费用行的 `attachments`。历史回读已确认该结构与网页一致。
+
 **增量报销与去重（支持会话过期后继续追加）**：`add-invoice`/`add-manual-expense` 先按指定 ER 单号定位已有草稿（不新建），并在 OCR 拿到发票号后与单内已有发票号比对——**重复票跳过并返回 `duplicate:true` 提示，新票才落账**。因此同一 ER 单可分多次追加发票，跨会话/会话过期也安全：再次上传已存在的发票只会被提醒、不会重复绑定。用 `verify-report` 可随时查看单内全部发票号。
 
 关键规则：
@@ -247,11 +251,13 @@ python scripts/hly.py add-invoice \
 python scripts/hly.py add-manual-expense \
   --username <账号> --report <编辑中ER单号> \
   --expense-type 出差补贴 --amount <金额> --date <YYYY-MM-DD> \
-  --field 补贴天数=<天数> --field 客户名称=<说明> \
+  --field 补贴天数=<天数> --field 客户名称=<客户名称> \
   --confirm-draft-write
 ```
 
-流程为：历史同类无票费用取得字段结构 → 校验必填字段 → 默认分摊及申请预算关联 → `POST /invoice/api/validate/invoice/async` → `POST /invoice/api/v6/invoices`。请求必须为 `withReceipt=false`、空 `receiptList`。v5 在此租户的无票场景会返回服务器 500，禁止用于手录费用。
+出差补贴固定为 100 元/天，金额必须严格等于 `补贴天数 × 100`。客户名称业务上允许暂时留空，由用户稍后在网页填写；但当前租户 API 在该必填字段留空时会进入 `INVOICE_ASYNC_ERROR`。因此 API 模式下客户名称留空时只做预校验并停止；需要留空的费用由用户在网页手工新建/补录，不得伪造测试文案，也不得继续制造失败费用。
+
+完整流程为：从 `FINISHED` 的历史同类无票费用读取完整详情（含任职岗位）→ 校验 100 元/天 → 默认分摊及申请预算关联 → `POST /invoice/api/validate/invoice/async` → 预校验无错才调用 `POST /invoice/api/v6/invoices` → 轮询回读。请求必须为 `withReceipt=false`、空 `receiptList`。只有最终 `invoiceStatus=FINISHED`、无 `INVOICE_ASYNC_ERROR` 才算成功；总额或行数增加不能代替终态验收。
 
 ## Step 5：回读验收
 
@@ -267,6 +273,7 @@ python scripts/hly.py add-manual-expense \
 - 差旅报销关联单号与用户指定申请一致，且三处关联结构完整。
 - 个人报销无申请关系。
 - `invoiceCount` 等于已成功落账票数。
+- `asynchronousSaveFailures` 必须为空，且 `businessAccepted=true`；任何“费用保存失败”标签都必须判失败。
 - 发票分组 `totalInvoiceAmount` 与单据 `totalAmount` 一致（浮点展示按货币精度比较）。
 - 差旅申请预算与差旅报销费用按规范化后的类别汇总比较；`其他交通` 与历史中的 `市内交通费` 视为同类。
 - 每类输出申请汇总额、报销汇总额、发票张数和差额。报销中没有申请类目的费用标记为 `manual-expense`，但不判失败。
