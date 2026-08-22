@@ -2,7 +2,19 @@
 
 让 Agent 根据用户上传的 PDF、OFD、ZIP、XML 票据，协助创建汇联易差旅申请、差旅报销和个人报销草稿，并交付 Excel 分类金额核对表。
 
-## 安装
+## 快速安装：复制给你的 Agent
+
+复制下面整段内容，直接发送给你正在使用的 Agent：
+
+```text
+请把 https://github.com/Mehael-Yeh/huilianyi-reimbursement 安装或更新为可调用的 Skill，名称为 huilianyi-reimbursement。
+
+优先使用你自带的 Skill 安装机制；如果没有，请把仓库克隆到你的用户级 Skill 目录，并安装 requirements.txt 中的 Python 依赖。仓库是私有仓库时，使用当前已有的 GitHub 授权，不要要求我把访问令牌写进聊天或命令。
+
+安装后请完整读取 SKILL.md，运行可用的 Skill 结构校验和项目测试，并确认该 Skill 能被发现。只向我报告安装路径、当前提交或版本、校验结果；本次不要登录汇联易，也不要创建任何申请单或报销单。
+```
+
+## 手动安装
 
 克隆仓库并安装 Python 依赖：
 
