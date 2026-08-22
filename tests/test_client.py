@@ -84,6 +84,32 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(rows, [{"operation": "created"}])
         self.assertIn("expenseReportOID=report%201", seen[0])
 
+    def test_round_two_read_methods_use_observed_query_contracts(self):
+        seen = []
+
+        def opener(request, timeout):
+            seen.append((request.method, request.full_url, request.data))
+            if "/payment/schedule/" in request.full_url:
+                return Response({"paymentSchedules": [{"status": 1003}]})
+            return Response({"rows": [{"id": "one"}]})
+
+        client = self.client(opener)
+        self.assertEqual(client.list_invoice_pool(2, 10), [{"id": "one"}])
+        self.assertEqual(client.list_my_expense_items(1, 5), [{"id": "one"}])
+        self.assertEqual(
+            client.get_reimbursement_payment_schedules("report 1"), [{"status": 1003}]
+        )
+        self.assertEqual(seen[0][0], "GET")
+        self.assertIn("page=2&size=10", seen[0][1])
+        self.assertEqual(seen[1][0], "POST")
+        self.assertEqual(json.loads(seen[1][2]), {"page": 1, "size": 5})
+        self.assertIn("expOid=report+1", seen[2][1])
+
+    def test_currencies_require_explicit_ledger(self):
+        with self.assertRaises(HuilianyiError) as caught:
+            self.client(lambda request, timeout: Response({})).list_currencies("")
+        self.assertEqual(caught.exception.code, ErrorCode.VALIDATION_ERROR)
+
 
 if __name__ == "__main__":
     unittest.main()

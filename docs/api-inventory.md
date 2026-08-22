@@ -22,6 +22,13 @@ All responses are JSON. List endpoints have historically returned one of `rows`,
 | `GET /api/invoices/{oid}` | Expense/invoice detail | invoice OID | expense fields and receipts | workflow, SDK | receipt reconciliation | no | READ |
 | `GET /api/custom/forms/my/available` | Available forms | formType 101/102 | form rows | documentation only | form discovery | no | READ |
 | `POST /api/expense/type/byUser` | Available expense types | report/applicant/form | type rows and receipt rules | workflow, SDK | expense construction | no | READ |
+| `GET /api/widget/company/all` | Visible company ledgers | enabled | company/legal entity/ledger rows; raw DTO is sensitive | SDK | ledger selection | no | READ |
+| `GET /api/currency/rate/list/all` | Currency and exchange-rate list | ledger/language/enabled | currency/rate rows | SDK | currency lookup | no | READ |
+| `GET /api/receipt/pool/query/v2` | Current-user invoice pool | page/size | paged receipts | SDK | invoice selection | no | READ |
+| `POST /api/invoices/my` | Current-user reusable expense items | page/size | paged expense items | SDK | expense lookup | no | READ |
+| `GET /api/loanBill/repayment/summary` | Loan repayment summary | none | currency amount/count groups | SDK | loan overview | no | READ |
+| `GET /api/loanBill/query/business/code/by/keyword` | Loan search | keyword | visible loan rows or empty | SDK | loan lookup | no | READ |
+| `GET /api/payment/schedule/query/by/expOid` | Reimbursement payment status | report OID | payment schedule rows | SDK | read-only payment status | no | READ |
 
 ## Draft creation and expense landing
 
@@ -58,4 +65,6 @@ authenticated user
 
 Read-only live verification added `GET /api/widget/company/all`, `GET /api/cost/centers/search`, `GET /api/loanBill/my/amountAndCount`, `GET /api/travel/applications/itinerarys`, and `GET /api/v2/expense/reports/approval/history`. The company DTO is intentionally not exposed raw because it contains broad tenant/security configuration fields. Cost-center, loan summary, itinerary, and approval-history reads are exposed through curated SDK/MCP methods.
 
-Production Bundle context established GET method evidence for project values (`/api/budget/structure/assign/project/queryAll`) and currency rates (`/api/currency/rate/list/all`), but these remain `observed`: required tenant/budget context and response schemas have not been live-verified. Payment and budget balance families likewise remain unexposed.
+Production Bundle and live reads now verify currency rates, invoice-pool listing, current-user expense listing, loan repayment summary/search, and reimbursement payment schedules. MCP returns allowlisted fields for invoice-pool and payment responses; it does not return the raw DTOs.
+
+The Web bundle shows budget calls under `/budget-service`, including structure and project queries. Current-tenant read probes reached the service but returned a system exception, so budget structures and projects remain `partially_verified` and unexposed. The international-area path returned 404. The current-user bank-account query succeeded, but it remains `FINANCIAL` and unexposed because its raw rows contain account number, IBAN, SWIFT, and related sensitive fields.

@@ -58,6 +58,18 @@ class HuilianyiTools:
             return {key: account.get(key) for key in keys if key in account}
         return self._call(operation)
 
+    def list_ledgers(self) -> dict[str, Any]:
+        safe_keys = (
+            "companyOID", "companyCode", "name", "legalEntityId", "legalEntityName",
+            "setOfBooksId", "setOfBooksName", "baseCurrency", "baseCurrencyName",
+            "functionalCurrencyCode", "functionalCurrencyName", "countryCode", "countryName",
+        )
+        return self._call(
+            lambda client: [
+                self._allowlist(row, safe_keys) for row in client.list_companies(enabled=True)
+            ]
+        )
+
     def list_available_forms(self, form_type: int) -> dict[str, Any]:
         return self._call(lambda client: client.list_available_forms(form_type))
 
@@ -67,6 +79,80 @@ class HuilianyiTools:
     def get_loan_balance_summary(self) -> dict[str, Any]:
         safe_keys = ("count", "currencyCode", "stayWriteOffAmount")
         return self._call(lambda client: self._allowlist(client.get_loan_balance_summary(), safe_keys))
+
+    def get_loan_repayment_summary(self) -> dict[str, Any]:
+        safe_keys = ("amount", "baseCurrency", "count")
+        return self._call(
+            lambda client: [
+                self._allowlist(row, safe_keys)
+                for row in client.get_loan_repayment_summary()
+            ]
+        )
+
+    def search_loans(self, keyword: str = "") -> dict[str, Any]:
+        safe_keys = (
+            "loanBillOID", "entityOID", "businessCode", "status", "applicantName",
+            "amount", "totalAmount", "balance", "currencyCode", "createdDate",
+        )
+        return self._call(
+            lambda client: [self._allowlist(row, safe_keys) for row in client.search_loans(keyword)]
+        )
+
+    def list_currencies(self, set_of_books_id: str) -> dict[str, Any]:
+        safe_keys = (
+            "currencyCode", "currencyName", "baseCurrencyCode", "baseCurrencyName",
+            "rate", "precision", "enable", "applyDate",
+        )
+        return self._call(
+            lambda client: [
+                self._allowlist(row, safe_keys)
+                for row in client.list_currencies(set_of_books_id)
+            ]
+        )
+
+    def list_invoice_pool(self, page: int = 0, size: int = 50) -> dict[str, Any]:
+        safe_keys = (
+            "receiptOID", "invoiceOID", "receiptType", "billingCode", "billingNo",
+            "billingDate", "title", "payee", "totalAmount", "tax", "feeWithoutTax",
+            "vatInvoiceCurrencyCode", "receiptStatus", "reimburseStatus", "reimbursed",
+            "unUsedAmount", "expenseTypeName", "checkResult",
+        )
+        return self._paged(
+            lambda client: [
+                self._allowlist(row, safe_keys)
+                for row in client.list_invoice_pool(page, size)
+            ],
+            page,
+            size,
+        )
+
+    def list_my_expense_items(self, page: int = 0, size: int = 50) -> dict[str, Any]:
+        safe_keys = (
+            "invoiceOID", "entityOID", "expenseTypeName", "expenseCode", "amount",
+            "currencyCode", "status", "reimburseStatus", "reimbursementAmount",
+            "businessCode", "createdDate", "lastModifiedDate",
+        )
+        return self._paged(
+            lambda client: [
+                self._allowlist(row, safe_keys)
+                for row in client.list_my_expense_items(page, size)
+            ],
+            page,
+            size,
+        )
+
+    def get_reimbursement_payment_status(self, reimbursement_oid: str) -> dict[str, Any]:
+        safe_keys = (
+            "paymentScheduleOid", "businessCode", "status", "stageCode", "amount",
+            "baseAmount", "currencyCode", "planedPaymentDate", "realPaymentDate",
+            "totallyPaid", "paymentMethodName",
+        )
+        return self._call(
+            lambda client: [
+                self._allowlist(row, safe_keys)
+                for row in client.get_reimbursement_payment_schedules(reimbursement_oid)
+            ]
+        )
 
     def list_travel_itineraries(
         self, application_oid: str, user_oid: str, with_details: bool = True
