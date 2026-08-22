@@ -1,1 +1,2 @@
 cryptography>=36
+pypdf>=4

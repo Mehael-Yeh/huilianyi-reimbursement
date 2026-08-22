@@ -1,85 +1,49 @@
-# 发票纯 API 落账
+# 费用保存
 
-2026-08-21 使用 4 张真实 PDF 对差旅报销与个人报销完成端到端验证。2026-08-22 又验证了格式白名单、OFD 最终保存和无票费用异步终态。
+## 有票费用
 
-## 顺序
-
-1. 上传：`POST /api/upload/attachment`，multipart 字段 `attachmentType=INVOICE_IMAGES`、`file=<PDF>`。
+1. 上传附件：`POST /api/upload/attachment`。
 2. OCR：`POST /receipt/api/receipt/ocr/v3`。
-3. 查验：`POST /receipt/api/receipt/verify/batch`，取响应中的富化 `invoiceInfo`。
-4. 动态查询费用类型：`POST /api/expense/type/byUser`。
-5. 默认值：`POST /invoice/api/invoice/defaults`。
-6. 默认分摊：`POST /api/expense/default/apportionment`。
-7. 税额/金额：`POST /invoice/api/invoice/tax/amount/by/receipts`。
-8. 创建并绑定费用行：`POST /invoice/api/v5/invoices`。
-9. 回读：`GET /api/expense/report/invoices/v2?expenseReportOID={oid}`。
+3. 查验并取得富化票据信息：`POST /receipt/api/receipt/verify/batch`。
+4. 动态查询当前用户可用费用类型。
+5. 获取费用默认值和默认分摊。
+6. 计算税额和可报销金额。
+7. 使用 `POST /invoice/api/v5/invoices` 创建费用并绑定票据。
+8. 回读报告费用，核对类型、金额、票据和附件。
 
-## 关键纠错
+关键约束：
 
-### receipt.id 可以为空
+- `receipt.id` 可以为空，但必须有有效 `receiptOID` 和完整查验结果。
+- 税额接口返回的临时 `invoiceOID` 不能传入最终创建请求。
+- `amount` 与 `originalAmount` 必须等于查验返回的含税总额。本地文本层无金额时使用 OCR/查验金额；用户显式金额与查验金额不一致时停止。
+- 差旅同类发票复用申请中全部同类预算行的数值 `id` 列表；不能传 `budgetOID` 或标量。
+- 申请缺少实际类别时传空预算列表，不得错分费用。
+- 通行汇总单、行程单等材料写入费用顶层 `attachments`，不加入 `receiptList`。
+- 创建费用后不再回存整张报销单实体。
 
-实测 4 张成功发票均为：
+## 无票费用
 
-```json
-{"id": null, "receiptOID": "<有效OID>"}
-```
+1. 确认费用类型允许无票手工创建。
+2. 读取无异步错误的历史同类费用完整 DTO。
+3. 使用当前报销单的 `applicantJobId`。
+4. 调用默认分摊，并补齐金额、本位币金额、币种、费用类型、人员和单据公司字段。
+5. 设置 `withReceipt=false`、`receiptList=[]`、`valid=false`、`paymentCompanyOID=null`。
+6. 先调用异步预校验，再调用 `POST /invoice/api/v6/invoices`。
+7. 轮询回读直到明确成功或失败。
 
-`receiptOID`、查验结果和完整富化字段是关键，不要求数字 `id`。
+无票异步状态：
 
-### 不得把 tax 的 invoiceOID 传给 v5
+| `invoiceSaveStatus` | 含义 | 动作 |
+|---:|---|---|
+| 100 | 保存失败 | 标记失败并停止 |
+| 101 | 处理中 | 继续轮询 |
+| 102 | 保存成功 | 结合标签和费用字段验收 |
+| `null` | 同步保存或历史正常状态 | 无失败标签时可验收 |
 
-`tax/amount` 返回一个临时 `invoiceOID`。若原样合并到 `v5/invoices`，服务器会把请求当成更新不存在/已删除的费用，返回：
+出差补贴还必须满足金额等于补贴天数乘以 100，客户名称允许为空。
 
-```text
-invoice.already.deleted / 该费用已被其他人删除
-```
+## 统一验收
 
-最终请求构造：
+任何格式都只有在费用创建、票据绑定和回读完成后才算成功。上传、文本识别、OCR 或查验成功不能代替最终费用落账成功。
 
-```python
-body = {k: v for k, v in tax_result.items() if v is not None}
-body.update(common_fields)
-body.pop("invoiceOID", None)
-body["valid"] = True
-```
-
-### 金额
-
-`amount` 和 `originalAmount` 必须等于本张发票实际报销金额，否则会触发发票可报销额度校验。
-
-### 同类发票关联申请预算
-
-差旅报销先按规范化费用类型查找关联申请的 `budgetDetailDTO.budgetDetail[]`：
-
-- 将所有同类预算行的数值 `id` 组成数组传入默认分摊请求的 `applicationCustomBudgetId`；同类所有发票复用该数组。
-- 不得传 `budgetOID`，不得传标量。只读探针验证这两种形式都会返回校验错误。
-- 申请没有该类目时传 `[]`，按手录费用新增真实类别。
-- 最终费用请求必须携带默认分摊接口返回的 `expenseApportion`；成功匹配时其中含 `relationApplicationApportionmentGroupMd5`。
-- 预算类目金额是汇总基线，并非每张发票额度；发票合计可以与申请金额不同。
-
-### v5 是落账真值
-
-`v5/invoices` 成功后会创建费用行、绑定发票并更新报告总额。不再手拼 `expenseReportInvoices`，也不再额外回存整单实体。
-
-实现见 `hly_workflow.add_invoice()`。
-
-## 无票手录费用
-
-2026-08-22 复核证明早先“创建 1.00 元出差补贴成功”的结论错误：费用虽进入列表并增加总额，但 `invoiceSaveStatus=100`，带 `INVOICE_ASYNC_ERROR/费用保存失败`，不能算成功。
-
-1. 动态查询费用类型，确认 `invoiceRequired=false`、`pasteInvoiceNeeded=false`、允许手工创建。
-2. 从无异步错误的历史同类无票费用读取 `/api/invoices/{oid}` 完整详情；列表摘要缺少保存上下文，不能作为模板。历史 `FINISHED` DTO 可能没有任职岗位，必须用当前报销单的 `applicantJobId`。
-3. 出差补贴强制 `金额 = 补贴天数 × 100`。
-4. 调用默认分摊；该接口返回的是分摊骨架，必须补齐 `amount`、`baseCurrencyAmount`、`currency`、`expenseTypeId`、人员以及单据公司字段。有同类申请预算时传数值预算行 ID 列表，否则传空列表。
-5. 请求设置 `withReceipt=false`、`receiptList=[]`、`receipts=[]`。
-6. 先调用 `POST /invoice/api/validate/invoice/async`；预校验报错时停止，不创建。
-7. 仅在预校验无错时调用 `POST /invoice/api/v6/invoices`。
-8. 轮询 invoices/v2；编辑中报销单的费用可以正常停在 `SUBMITTED`，也可能为 `FINISHED`。`invoiceSaveStatus=101` 表示仍在处理，`100` 表示失败，`102` 表示异步保存成功；网页同步保存可能为 `null`。成功状态还必须没有异步失败标签。
-
-用户在网页成功保存的 `EXP1321459248` 实证：16 天、1600 元、客户名称为空，状态 `SUBMITTED`，无异步失败。空客户不是失败原因。API 失败请求与网页成功 DTO 的关键差异包括任职/草稿语义，以及默认分摊骨架中的金额、费用类型、人员和单据公司字段未补齐；异步保存不会替客户端补全这些字段。
-
-补齐分摊 DTO 后，API 实测 `EXP1321459863`：1 天、100 元、客户名称为空，最终 `invoiceStatus=SUBMITTED`、`invoiceSaveStatus=102`，正常生成“必填未输、无票”标签，分摊金额、费用类型、人员和嘉兴锐石单据公司字段全部落库。无票出差补贴 API 全链路通过。
-
-## OFD
-
-真实 OFD `25322000000577483943` 可完成上传、OCR、查验、费用类型和税额计算，但最终 `v5/invoices` 返回 `SYSTEM_EXCEPTION` 500，未新增费用行。OFD 当前状态是“识别链路通过、费用落账失败”；不要用 OCR 成功替代全链路成功。
+失败时保留已有单据和费用，不自动删除；向用户报告费用编号、当前状态和可见错误标签。

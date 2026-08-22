@@ -30,6 +30,7 @@ from hly_workflow import (
     search_reports,
     verify_report_invoices,
 )
+from review_export import load_json, merge_review_data
 
 
 def _password() -> str:
@@ -289,6 +290,27 @@ def command_verify_report(args):
     print(json.dumps(verify_report_invoices(api, report["expenseReportOID"]), ensure_ascii=False, indent=2))
 
 
+def command_prepare_review(args):
+    api, _ = _clients(args.username)
+    reports = []
+    categories = []
+    for code in args.report:
+        report = find_report(api, code)
+        verification = verify_report_invoices(api, report["expenseReportOID"])
+        reports.append(verification)
+        if report.get("applicationOID"):
+            comparison = compare_travel_amounts(
+                get_application(api, report["applicationOID"]),
+                api.request(
+                    f"/api/expense/report/invoices/v2?expenseReportOID={report['expenseReportOID']}"
+                ).get("rows") or {},
+            )
+            categories.extend(comparison.get("categories") or [])
+    review = merge_review_data(load_json(args.invoice_review), reports, categories)
+    _write_json(args.output, review)
+    print(json.dumps({"output": str(Path(args.output).resolve()), "rows": len(review["rows"])}, ensure_ascii=False, indent=2))
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Huilianyi draft-only API workflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -337,7 +359,7 @@ def build_parser():
     invoice.add_argument("--report", required=True)
     invoice.add_argument("--file", required=True)
     invoice.add_argument("--expense-type", required=True)
-    invoice.add_argument("--amount", type=float, required=True)
+    invoice.add_argument("--amount", type=float, help="optional; otherwise use verified OCR amount")
     invoice.add_argument(
         "--attachment", action="append", default=[], help="supporting toll document (PDF/OFD/ZIP/XML)"
     )
@@ -361,6 +383,13 @@ def build_parser():
     verify.add_argument("--username", required=True)
     verify.add_argument("--report", required=True)
     verify.set_defaults(func=command_verify_report)
+
+    review = sub.add_parser("prepare-review", help="merge invoice classification with saved expense results")
+    review.add_argument("--username", required=True)
+    review.add_argument("--report", action="append", required=True)
+    review.add_argument("--invoice-review", required=True)
+    review.add_argument("--output", default="tmp/reimbursement-review.json")
+    review.set_defaults(func=command_prepare_review)
     return parser
 
 

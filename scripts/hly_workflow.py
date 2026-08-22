@@ -23,6 +23,11 @@ DRAFT_STATUS = 1001
 APPROVED_APPLICATION_STATUS = 1003
 TRAVEL_TYPE_ALIASES = {"市内交通费": "其他交通", "其他交通费": "其他交通"}
 ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".ofd", ".zip", ".xml"}
+RECEIPT_AMOUNT_KEYS = (
+    "totalTaxIncludedAmount", "taxInclusiveTotalAmount", "amountIncludingTax",
+    "totalAmountWithTax", "invoiceAmountWithTax", "totalPriceAndTax", "priceTaxTotal",
+    "invoicePriceTaxTotal", "invoiceTotalAmount", "invoiceAmount", "totalAmount",
+)
 HOTEL_CITY_CODES = {
     "上海": "CHN031000000",
     "南京": "CHN032001000",
@@ -44,6 +49,28 @@ def validate_upload_file(file_path: str | Path) -> Path:
         allowed = ", ".join(sorted(ALLOWED_UPLOAD_SUFFIXES))
         raise ValueError(f"unsupported upload format {suffix or '<none>'}; allowed: {allowed}")
     return path
+
+
+def recognized_receipt_amount(receipt: dict[str, Any]) -> float | None:
+    """Return a verified tax-inclusive amount, never tax or unit price."""
+    containers = [receipt]
+    for key in ("invoiceInfo", "receiptInfo", "recognizedData"):
+        value = receipt.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    for container in containers:
+        for key in RECEIPT_AMOUNT_KEYS:
+            value = container.get(key)
+            if value in (None, ""):
+                continue
+            normalized = re.sub(r"[^0-9.,-]", "", str(value)).replace(",", "")
+            try:
+                amount = round(float(normalized), 2)
+            except ValueError:
+                continue
+            if amount > 0:
+                return amount
+    return None
 
 
 def infer_hotel_cities(*values: Any) -> list[str]:
@@ -705,6 +732,16 @@ def add_invoice(
     )
     receipt = _verified_receipt(verified)
     receipt["pdfUrl"] = receipt.get("pdfUrl") or upload.get("fileURL") or upload.get("downloadUrl")
+    recognized_amount = recognized_receipt_amount(receipt)
+    if amount is None:
+        if recognized_amount is None:
+            raise ValueError("invoice amount is unavailable after OCR/verification; confirm it manually")
+        amount = recognized_amount
+    amount = round(float(amount), 2)
+    if recognized_amount is not None and abs(amount - recognized_amount) > 0.01:
+        raise ValueError(
+            f"provided amount {amount:.2f} differs from verified invoice amount {recognized_amount:.2f}"
+        )
 
     # Incremental dedup: if this invoice number already exists in the report, skip it.
     invoice_no = str(receipt.get("invoiceNumber") or receipt.get("invoiceCode") or "").strip()
@@ -789,6 +826,7 @@ def add_invoice(
         "receiptId": receipt.get("id"),
         "expenseType": expense_type_name,
         "amount": float(amount),
+        "recognizedAmount": recognized_amount,
         "budgetMatch": budget_match,
         "attachments": [item.get("fileName") for item in attachments],
         "hotelCities": resolved_hotel_cities,
@@ -864,7 +902,7 @@ def complete_manual_apportionment(
     report: dict[str, Any],
     template: dict[str, Any],
     expense_type_id: str,
-    amount: float,
+    amount: float | None,
 ) -> list[dict[str, Any]]:
     """Fill the client-side fields omitted by the default-apportionment API."""
     owner_job = template.get("ownerJob") or {}

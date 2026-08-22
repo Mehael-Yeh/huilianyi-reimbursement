@@ -18,6 +18,7 @@ from hly_workflow import (  # noqa: E402
     hotel_field_values,
     infer_hotel_cities,
     report_date_values,
+    recognized_receipt_amount,
     validate_manual_expense_values,
     complete_manual_apportionment,
     validate_upload_file,
@@ -245,6 +246,16 @@ class WorkflowTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unsupported upload format"):
                     validate_upload_file(path)
 
+    def test_receipt_amount_uses_tax_inclusive_fields_only(self):
+        self.assertEqual(
+            recognized_receipt_amount({
+                "taxAmount": 5,
+                "invoiceInfo": {"totalTaxIncludedAmount": "¥105.00"},
+            }),
+            105.0,
+        )
+        self.assertIsNone(recognized_receipt_amount({"taxAmount": 5, "unitPrice": 100}))
+
     def test_travel_subsidy_is_exactly_100_per_day(self):
         validate_manual_expense_values(
             "出差补贴", 2900, {"补贴天数": "29", "客户名称": ""}
@@ -270,9 +281,9 @@ class WorkflowTests(unittest.TestCase):
             [{"costCenterItems": []}],
             {
                 "applicantOID": "person-1",
-                "applicantName": "叶皓",
+                "applicantName": "报销人",
                 "docCompanyOID": "doc-company-oid",
-                "docCompanyName": "嘉兴锐石化工有限公司",
+                "docCompanyName": "示例公司",
                 "docCompanyCode": "rs",
             },
             {"companyID": "doc-company-id", "ownerJob": {"employeeId": "241202623"}},
