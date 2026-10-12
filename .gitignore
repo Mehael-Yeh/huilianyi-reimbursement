@@ -6,3 +6,5 @@ tmp/
 node_modules/
 outputs/
 .venv/
+
+*.egg-info/

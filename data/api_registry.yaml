@@ -1,5 +1,5 @@
 version: 1
-last_updated: 2026-08-23
+last_updated: 2026-10-12
 statuses: [verified, observed, partially_verified, undocumented, deprecated, unknown]
 apis:
   - name: oauth_login
@@ -214,13 +214,13 @@ apis:
     method: POST
     path: /invoice/api/invoice/defaults
     domain: invoices
-    description: Calculate default fields for an expense type and receipts.
-    request: {body: [expenseTypeId, receipts]}
-    response: {shape: object, fields: [data, expenseApportion]}
+    description: "Calculate default fields for an expense type and receipts; answers with the bare field list, not a data envelope."
+    request: {body: [expenseTypeId, receipts], note: pass the verified invoiceInfo rows, unverified OCR rows carry no sellerCityCode and yield an empty answer}
+    response: {shape: list, fields: [fieldOID, fieldLabel, fieldType, fieldTypeEnum, value, showValue, config]}
     auth_required: true
     mutation: false
     risk_level: READ
-    discovered_from: [scripts/hly_workflow.py, live-invoice-validation]
+    discovered_from: [scripts/hly_workflow.py, live-invoice-validation, live-2026-10-12-write-path]
     status: verified
     mcp_exposed: false
   - name: get_default_apportionment
@@ -536,17 +536,17 @@ apis:
     status: observed
     mcp_exposed: false
   - name: submit_reimbursement
-    method: UNKNOWN
+    method: POST
     path: /api/v3/expense/report/submit
     domain: reimbursements
-    description: Observed reimbursement submission endpoint; intentionally unavailable to MCP.
-    request: {unknown: true}
-    response: {unknown: true}
+    description: Submit-or-check one reimbursement report; posting the report DTO submits it when no confirmation is needed. Intentionally unavailable to MCP.
+    request: {query: [roleType], body: expense report DTO, note: "set ignoreBudgetWarningFlag=true to accept a 总金额超申请 warning; the answer reports passFlag/submitSuccess/needConfirm/checkResultList"}
+    response: {fields: [passFlag, submitSuccess, needConfirm, checkResultList]}
     auth_required: true
     mutation: true
     risk_level: STATE_CHANGE
-    discovered_from: [production-web-bundle-2026-08-23]
-    status: observed
+    discovered_from: [production-web-bundle-2026-08-23, live-2026-10-12-write-path]
+    status: verified
     mcp_exposed: false
   - name: reject_expense_invoice
     method: UNKNOWN
@@ -610,6 +610,58 @@ apis:
     auth_required: true
     mutation: true
     risk_level: FINANCIAL
+    discovered_from: [production-web-bundle-2026-08-23]
+    status: observed
+    mcp_exposed: false
+  - name: remove_expense_invoice
+    method: DELETE
+    path: /api/expense/reports/remove/invoice/{expense_report_oid}/{invoice_oid}
+    domain: invoices
+    description: Detach one expense line from an editing draft. Removing a line does not release the receipts it claimed; release them with delete_invoice_record. Intentionally unavailable to MCP.
+    request: {path: [expense_report_oid, invoice_oid], note: the report id comes first}
+    response: {shape: object}
+    auth_required: true
+    mutation: true
+    risk_level: DESTRUCTIVE
+    discovered_from: [production-web-bundle-2026-08-23, live-2026-10-12-write-path]
+    status: verified
+    mcp_exposed: false
+  - name: delete_invoice_record
+    method: DELETE
+    path: /api/v2/invoice/{invoice_oid}
+    domain: invoices
+    description: Drop an orphaned invoice record and release the receipt amount it held; requires confirm=Y. Only works once the expense line is gone. Intentionally unavailable to MCP.
+    request: {path: [invoice_oid], query: [confirm]}
+    response: {shape: object, fields: [validateResult]}
+    auth_required: true
+    mutation: true
+    risk_level: DESTRUCTIVE
+    discovered_from: [production-web-bundle-2026-08-23, live-2026-10-12-write-path]
+    status: verified
+    mcp_exposed: false
+  - name: preview_approval_nodes
+    method: POST
+    path: /api/approvals/next/all/ruleApprovalNodeOID
+    domain: approvals
+    description: Preview the rule approval route a document will follow, including the approver of every node.
+    request: {body: [entityType, entityOID], note: entityType 1002 for reimbursement reports}
+    response: {shape: list, fields: [name, nodeApproverDescription, ruleApprovalNodeOID, ruleApprovers]}
+    auth_required: true
+    mutation: false
+    risk_level: READ
+    discovered_from: [live-2026-10-12-write-path]
+    status: verified
+    mcp_exposed: false
+  - name: withdraw_reimbursement
+    method: POST
+    path: /api/approvals/withdraw
+    domain: approvals
+    description: Observed withdrawal of a submitted document; intentionally unavailable to MCP.
+    request: {body_observed: [entityType, entityOID]}
+    response: {unknown: true}
+    auth_required: true
+    mutation: true
+    risk_level: STATE_CHANGE
     discovered_from: [production-web-bundle-2026-08-23]
     status: observed
     mcp_exposed: false

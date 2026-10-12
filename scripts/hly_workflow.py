@@ -24,6 +24,13 @@ DRAFT_STATUS = 1001
 APPROVED_APPLICATION_STATUS = 1003
 TRAVEL_TYPE_ALIASES = {"市内交通费": "其他交通", "其他交通费": "其他交通"}
 ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".ofd", ".zip", ".xml"}
+ATTACHMENT_SUFFIXES = ALLOWED_UPLOAD_SUFFIXES | {".xlsx", ".xls", ".xlsm"}
+ATTACHMENT_EXPENSE_TYPES = {"过路费", "里程补贴", "油费"}
+MILEAGE_SHEET_PATTERNS = ("私车公用报销清单*.xls*", "*里程截图*.xls*")
+FIELD_ALIASES = {
+    "入住城市": ("入住城市", "location"),
+    "开始结束日期": ("开始结束日期", "dateCombined"),
+}
 RECEIPT_AMOUNT_KEYS = (
     "totalTaxIncludedAmount", "taxInclusiveTotalAmount", "amountIncludingTax",
     "totalAmountWithTax", "invoiceAmountWithTax", "totalPriceAndTax", "priceTaxTotal",
@@ -50,6 +57,34 @@ def validate_upload_file(file_path: str | Path) -> Path:
         allowed = ", ".join(sorted(ALLOWED_UPLOAD_SUFFIXES))
         raise ValueError(f"unsupported upload format {suffix or '<none>'}; allowed: {allowed}")
     return path
+
+
+def validate_attachment_file(file_path: str | Path) -> Path:
+    """Supporting documents may be spreadsheets (for example mileage sheets)."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    suffix = path.suffix.lower()
+    if suffix not in ATTACHMENT_SUFFIXES:
+        allowed = ", ".join(sorted(ATTACHMENT_SUFFIXES))
+        raise ValueError(f"unsupported attachment format {suffix or '<none>'}; allowed: {allowed}")
+    return path
+
+
+def default_mileage_sheets(paths: list[str | Path]) -> list[Path]:
+    """Locate the 私车公用 mileage workbook stored next to a mileage batch."""
+    found: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        folder = Path(path).parent
+        for pattern in MILEAGE_SHEET_PATTERNS:
+            for candidate in sorted(folder.glob(pattern)):
+                key = str(candidate.resolve()).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append(candidate)
+    return found
 
 
 def recognized_receipt_amount(receipt: dict[str, Any]) -> float | None:
@@ -104,10 +139,74 @@ def infer_hotel_cities(*values: Any) -> list[str]:
     )
 
 
-def hotel_field_values(
-    data: list[dict[str, Any]], cities: list[str], start: str, end: str
+def empty_field_copy(field: dict[str, Any]) -> dict[str, Any]:
+    """Clone a saved field definition without leaking its old value."""
+    clone = copy.deepcopy(field)
+    clone["value"] = None
+    clone["showValue"] = ""
+    return clone
+
+
+def _field_labels(field: dict[str, Any]) -> set[str]:
+    return {
+        label
+        for label in (field.get("name"), field.get("messageKey"), field.get("fieldLabel"))
+        if label
+    }
+
+
+def _field_matches(field: dict[str, Any], name: str) -> bool:
+    return bool(_field_labels(field) & set(FIELD_ALIASES.get(name, (name,))))
+
+
+def _template_field(
+    templates: dict[str, dict[str, Any]] | None, name: str
+) -> dict[str, Any] | None:
+    if not templates:
+        return None
+    for key in (name,) + FIELD_ALIASES.get(name, (name,)):
+        if key in templates:
+            return templates[key]
+    return None
+
+
+def apply_field_values(
+    data: list[dict[str, Any]],
+    values: dict[str, Any],
+    templates: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Write explicit form values, adding fields the API defaults did not return.
+
+    `/invoice/api/invoice/defaults` only returns fields it can derive from the
+    receipts, so required form fields (客户名称 and friends) have to be added
+    with the definition of a saved expense of the same type.
+    """
     result = copy.deepcopy(data)
+    for name, value in values.items():
+        if value in (None, ""):
+            continue
+        target = next((field for field in result if _field_matches(field, name)), None)
+        if target is None:
+            template = _template_field(templates, name)
+            if template is None:
+                raise ValueError(f"expense field not available: {name}")
+            target = empty_field_copy(template)
+            target.setdefault("name", name)
+            result.append(target)
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            target["value"], target["showValue"] = value
+        else:
+            target["value"] = target["showValue"] = value
+    return result
+
+
+def hotel_field_values(
+    data: list[dict[str, Any]],
+    cities: list[str],
+    start: str,
+    end: str,
+    templates: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     start_date = _parse_date(start)
     end_date = _parse_date(end)
     duration = float((end_date - start_date).days + 1)
@@ -120,15 +219,53 @@ def hotel_field_values(
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    for field in result:
-        name = field.get("name") or field.get("messageKey")
-        if name in {"入住城市", "location"} and cities:
-            codes = [HOTEL_CITY_CODES[city] for city in cities if city in HOTEL_CITY_CODES]
-            field["value"] = ",".join(codes) if codes else "，".join(cities)
-            field["showValue"] = "，".join(cities)
-        elif name in {"开始结束日期", "dateCombined"}:
-            field["value"] = field["showValue"] = date_value
-    return result
+    values: dict[str, Any] = {"开始结束日期": date_value}
+    if cities:
+        codes = [HOTEL_CITY_CODES.get(city, city) for city in cities]
+        values["入住城市"] = (",".join(codes), "，".join(cities))
+    return apply_field_values(data, values, templates)
+
+
+_FIELD_TEMPLATE_CACHE: dict[str, dict[str, dict[str, Any]]] = {}
+
+
+def expense_field_templates(
+    api: Client, report: dict[str, Any], expense_type_name: str
+) -> dict[str, dict[str, Any]]:
+    """Clone form-field definitions from the newest saved expense of the same type."""
+    if expense_type_name in _FIELD_TEMPLATE_CACHE:
+        return _FIELD_TEMPLATE_CACHE[expense_type_name]
+    current_oid = report.get("expenseReportOID")
+    templates: dict[str, dict[str, Any]] = {}
+    for summary in search_reports(api):
+        oid = summary.get("expenseReportOID")
+        if not oid or oid == current_oid:
+            continue
+        try:
+            views = _expense_views(api, oid)
+        except Exception:
+            continue
+        for view in views:
+            if view.get("expenseTypeName") != expense_type_name:
+                continue
+            invoice_oid = view.get("invoiceOID") or view.get("entityOID")
+            if not invoice_oid:
+                continue
+            try:
+                dto = unwrap_row(api.request(f"/api/invoices/{invoice_oid}?isDateCombinedUTC=false"))
+            except Exception:
+                continue
+            if not isinstance(dto, dict):
+                continue
+            for field in dto.get("data") or []:
+                for label in _field_labels(field):
+                    templates.setdefault(label, copy.deepcopy(field))
+            if templates:
+                break
+        if templates:
+            break
+    _FIELD_TEMPLATE_CACHE[expense_type_name] = templates
+    return templates
 
 
 def business_code(item: dict[str, Any]) -> str | None:
@@ -722,6 +859,7 @@ def add_invoice(
     amount: float | None,
     attachment_paths: list[str | Path] | None = None,
     hotel_cities: list[str] | None = None,
+    field_values: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Single-invoice compatibility wrapper around the canonical batch pipeline."""
     batch = add_invoice_batch(
@@ -732,6 +870,7 @@ def add_invoice(
         expense_type_name,
         attachment_paths=attachment_paths,
         hotel_cities=hotel_cities,
+        field_values=field_values,
         upload_workers=1,
     )
     item = batch["items"][0]
@@ -779,6 +918,77 @@ def _verified_receipts(value: Any) -> list[dict[str, Any]]:
     return [row.get("invoiceInfo") or row for row in rows]
 
 
+def align_receipts(
+    uploads: list[dict[str, Any]], paths: list[Path], receipts: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Return the platform receipts ordered like ``paths``.
+
+    The OCR and verification services answer in their own order (usually the
+    reverse of the upload order) and every receipt carries the attachment it was
+    read from, so the mapping is rebuilt through ``ocrOriginAttachmentOID``.
+    Zipping positionally attached the wrong invoice number, amount and PDF to
+    each file. Receipts without an attachment link keep the legacy behaviour.
+    """
+    keys = ("ocrOriginAttachmentOID", "attachmentOID")
+    if not receipts or any(not any(receipt.get(key) for key in keys) for receipt in receipts):
+        return list(receipts)
+    by_attachment: dict[str, list[dict[str, Any]]] = {}
+    for receipt in receipts:
+        key = next(str(receipt[key]) for key in keys if receipt.get(key))
+        by_attachment.setdefault(key, []).append(receipt)
+    aligned: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for upload, path in zip(uploads, paths):
+        key = str(upload.get("attachmentOID") or upload.get("id") or "")
+        rows = by_attachment.get(key) or []
+        if len(rows) == 1:
+            aligned.append(rows[0])
+        elif rows:
+            raise ValueError(f"OCR returned {len(rows)} receipts for one file: {Path(path).name}")
+        else:
+            missing.append(Path(path).name)
+    if missing:
+        raise ValueError("OCR returned no receipt for: " + ", ".join(missing))
+    return aligned
+
+
+def populate_apportionment(
+    rows: list[dict[str, Any]],
+    report: dict[str, Any],
+    expense_type_id: str,
+    amount: float,
+    tax_amount: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Complete the apportionment shell returned by /api/expense/default/apportionment.
+
+    The endpoint answers with a template whose ids and amounts are null. Expense
+    types that enable apportionment (see ``erApportionEnabled``) reject a create
+    that still carries that shell, so the row is filled before the V5 payload is
+    assembled.
+    """
+    report_id = report.get("id") or report.get("expenseReportId")
+    company_oid = report.get("docCompanyOID") or report.get("companyOID")
+    filled: list[dict[str, Any]] = []
+    for row in rows:
+        row = copy.deepcopy(row)
+        row["amount"] = amount
+        row["baseCurrencyAmount"] = amount
+        row["originTaxAmount"] = tax_amount
+        row["baseTaxAmount"] = tax_amount
+        row["currency"] = row.get("currency") or "CNY"
+        row["expenseTypeId"] = row.get("expenseTypeId") or expense_type_id
+        if report_id is not None:
+            row["expenseReportId"] = row.get("expenseReportId") or report_id
+        row["apportionmentCompanyOID"] = row.get("apportionmentCompanyOID") or company_oid
+        row["apportionmentCompanyName"] = row.get("apportionmentCompanyName") or report.get("docCompanyName")
+        row["apportionmentCompanyCode"] = row.get("apportionmentCompanyCode") or report.get("docCompanyCode")
+        if not row.get("proportion"):
+            row["proportion"] = 1
+        row["defaultApportion"] = True
+        filled.append(row)
+    return filled
+
+
 def add_invoice_batch(
     api: Client,
     gateway: Client,
@@ -787,6 +997,7 @@ def add_invoice_batch(
     expense_type_name: str,
     attachment_paths: list[str | Path] | None = None,
     hotel_cities: list[str] | None = None,
+    field_values: dict[str, Any] | None = None,
     upload_workers: int = 4,
 ) -> dict[str, Any]:
     """Bind one pre-classified category as one multi-receipt expense line.
@@ -799,9 +1010,13 @@ def add_invoice_batch(
     if not items:
         raise ValueError("invoice category contains no files")
     paths = [validate_upload_file(item["path"]) for item in items]
-    attachments_to_upload = [validate_upload_file(path) for path in (attachment_paths or [])]
-    if attachments_to_upload and expense_type_name != "过路费":
-        raise ValueError("supporting toll documents may only be attached to 过路费")
+    attachments_to_upload = [validate_attachment_file(path) for path in (attachment_paths or [])]
+    if not attachments_to_upload and expense_type_name in {"里程补贴", "油费"}:
+        # The private-car mileage workbook always belongs to a mileage/fuel expense.
+        attachments_to_upload = default_mileage_sheets(paths)
+    if attachments_to_upload and expense_type_name not in ATTACHMENT_EXPENSE_TYPES:
+        allowed = " or ".join(sorted(ATTACHMENT_EXPENSE_TYPES))
+        raise ValueError(f"supporting documents may only be attached to {allowed}")
 
     report_oid_value = report["expenseReportOID"]
     types = available_expense_types(api, report)
@@ -836,17 +1051,21 @@ def add_invoice_batch(
             for upload in uploads
         ],
     )
-    receipts = _receipt_list(ocr)
+    receipts = align_receipts(uploads, paths, _receipt_list(ocr))
     if len(receipts) != len(items):
         raise RuntimeError(f"OCR returned {len(receipts)} receipts for {len(items)} files")
     for receipt, upload in zip(receipts, uploads):
         receipt["pdfUrl"] = upload.get("fileURL") or upload.get("downloadUrl")
-    verified = _verified_receipts(
-        gateway.request(
-            "/receipt/api/receipt/verify/batch?roleType=TENANT",
-            "POST",
-            [{"invoiceInfo": receipt} for receipt in receipts],
-        )
+    verified = align_receipts(
+        uploads,
+        paths,
+        _verified_receipts(
+            gateway.request(
+                "/receipt/api/receipt/verify/batch?roleType=TENANT",
+                "POST",
+                [{"invoiceInfo": receipt} for receipt in receipts],
+            )
+        ),
     )
     if len(verified) != len(items):
         raise RuntimeError(f"verification returned {len(verified)} receipts for {len(items)} files")
@@ -906,15 +1125,32 @@ def add_invoice_batch(
         "POST",
         {"expenseTypeId": expense_type_id, "receipts": active_receipts},
     )
-    defaults = unwrap_row(defaults_value)
-    data = copy.deepcopy(defaults.get("data") or []) if isinstance(defaults, dict) else []
+    if isinstance(defaults_value, list):
+        # The endpoint answers with the raw field list, not a {"data": [...]} envelope.
+        defaults: dict[str, Any] = {"data": defaults_value}
+    else:
+        unwrapped = unwrap_row(defaults_value)
+        defaults = unwrapped if isinstance(unwrapped, dict) else {}
+        defaults_fields = defaults.get("data")
+        defaults["data"] = defaults_fields if isinstance(defaults_fields, list) else []
+    data = copy.deepcopy(defaults.get("data") or [])
+    templates: dict[str, dict[str, Any]] = {}
     resolved_hotel_cities: list[str] = []
     if expense_type_name == "酒店":
-        resolved_hotel_cities = list(dict.fromkeys(hotel_cities or infer_hotel_cities(paths, active_receipts)))
-        if not resolved_hotel_cities:
+        resolved_hotel_cities = list(
+            dict.fromkeys(hotel_cities or infer_hotel_cities(paths, active_receipts, data))
+        )
+        if not resolved_hotel_cities and not any(
+            _field_matches(field, "入住城市") and field.get("value") for field in data
+        ):
             raise ValueError("cannot infer hotel city; pass --hotel-city explicitly")
+        templates = expense_field_templates(api, report, expense_type_name)
         start, end = report_travel_date_range(api, report)
-        data = hotel_field_values(data, resolved_hotel_cities, start, end)
+        data = hotel_field_values(data, resolved_hotel_cities, start, end, templates=templates)
+    if field_values:
+        if not templates:
+            templates = expense_field_templates(api, report, expense_type_name)
+        data = apply_field_values(data, field_values, templates=templates)
     attachments = [api.upload_attachment(path) for path in attachments_to_upload]
     apportionment = unwrap_rows(api.request(
         "/api/expense/default/apportionment",
@@ -949,6 +1185,14 @@ def add_invoice_batch(
     tax_result = unwrap_row(gateway.request(
         "/invoice/api/invoice/tax/amount/by/receipts?roleType=TENANT", "POST", tax_body
     ))
+    if apportionment:
+        common["expenseApportion"] = populate_apportionment(
+            apportionment,
+            report,
+            expense_type_id,
+            amount,
+            float((tax_result or {}).get("taxAmount") or 0),
+        )
     v5_body = build_v5_body(tax_result, common)
     query = (
         f"/invoice/api/v5/invoices?hlyRequestID=agent-{int(time.time() * 1000)}&roleType=TENANT"

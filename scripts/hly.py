@@ -286,6 +286,17 @@ def command_audit_travel_pair(args):
     print(json.dumps(comparison, ensure_ascii=False, indent=2))
 
 
+def _parse_fields(pairs: list[str] | None) -> dict[str, str]:
+    """Parse repeated --field NAME=VALUE options into a form-value mapping."""
+    fields: dict[str, str] = {}
+    for pair in pairs or []:
+        name, separator, value = str(pair).partition("=")
+        if not separator or not name.strip():
+            raise SystemExit(f"--field expects NAME=VALUE, got: {pair}")
+        fields[name.strip()] = value.strip()
+    return fields
+
+
 def command_add_invoice(args):
     if not args.confirm_draft_write:
         raise SystemExit("Refusing external writes without --confirm-draft-write")
@@ -300,6 +311,7 @@ def command_add_invoice(args):
         args.amount,
         attachment_paths=args.attachment,
         hotel_cities=args.hotel_city,
+        field_values=_parse_fields(args.field),
     )
     verification = verify_report_invoices(api, report["expenseReportOID"])
     print(json.dumps({"created": result, "report": verification}, ensure_ascii=False, indent=2))
@@ -318,6 +330,7 @@ def command_add_invoice_batch(args):
         args.expense_type,
         attachment_paths=args.attachment,
         hotel_cities=args.hotel_city,
+        field_values=_parse_fields(args.field),
         upload_workers=args.upload_workers,
     )
     verification = verify_report_invoices(api, report["expenseReportOID"])
@@ -440,10 +453,16 @@ def build_parser():
     invoice.add_argument("--expense-type", required=True)
     invoice.add_argument("--amount", type=float, help="optional; otherwise use verified OCR amount")
     invoice.add_argument(
-        "--attachment", action="append", default=[], help="supporting toll document (PDF/OFD/ZIP/XML)"
+        "--attachment",
+        action="append",
+        default=[],
+        help="supporting document (PDF/OFD/ZIP/XML; XLSX for 里程补贴/油费, auto-attached for 里程补贴)",
     )
     invoice.add_argument(
         "--hotel-city", action="append", default=[], help="override/add an inferred hotel city"
+    )
+    invoice.add_argument(
+        "--field", action="append", default=[], help="expense form value NAME=VALUE (e.g. 客户名称=...)"
     )
     invoice.add_argument("--confirm-draft-write", action="store_true")
     invoice.set_defaults(func=command_add_invoice)
@@ -453,8 +472,16 @@ def build_parser():
     batch.add_argument("--report", required=True)
     batch.add_argument("--invoice-batch", required=True, help="JSON array of {path, amount} items")
     batch.add_argument("--expense-type", required=True)
-    batch.add_argument("--attachment", action="append", default=[])
+    batch.add_argument(
+        "--attachment",
+        action="append",
+        default=[],
+        help="supporting document (PDF/OFD/ZIP/XML; XLSX for 里程补贴/油费, auto-attached for 里程补贴)",
+    )
     batch.add_argument("--hotel-city", action="append", default=[])
+    batch.add_argument(
+        "--field", action="append", default=[], help="expense form value NAME=VALUE (e.g. 客户名称=...)"
+    )
     batch.add_argument("--upload-workers", type=int, default=4)
     batch.add_argument("--confirm-draft-write", action="store_true")
     batch.set_defaults(func=command_add_invoice_batch)
