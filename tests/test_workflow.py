@@ -1,3 +1,5 @@
+"""Workflow regression tests using synthetic entities and amounts."""
+
 import sys
 import json
 import tempfile
